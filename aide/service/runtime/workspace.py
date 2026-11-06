@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import weakref
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
@@ -13,6 +13,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import UUID, uuid4
 
+from loguru import logger
 from tzlocal import get_localzone_name
 
 from aide.agent.confirmation import (
@@ -77,7 +78,7 @@ from aide.agent.tools.tool_gateway import (
     ConfirmationRequester,
 )
 from aide.agent.workers.models import WorkerRecord
-from aide.agent.workers.store import WorkerStore, WorkerStoreError
+from aide.agent.workers.store import WorkerStore, WorkerStoreConflict, WorkerStoreError
 from aide.config.config import (
     ConfigError,
     UserConfiguration,
@@ -150,6 +151,17 @@ def _effective_task_restore_token(
     return fallback if fallback in valid_user_tokens else None
 
 
+def _is_transient_worker_persistence_error(error: BaseException) -> bool:
+    current: BaseException | None = error
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, OSError):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 class WorkspaceRecord:
     """Compatibility record for one Workspace's data and coordination state."""
 
@@ -197,7 +209,21 @@ class WorkspaceRecord:
         self._foreground_work_stores: dict[str, ForegroundWorkStore] = {}
         self._worker_stores: dict[str, WorkerStore] = {}
         self._worker_tasks: dict[
+            str, tuple[str, str, int, asyncio.Task[Any]]
+        ] = {}
+        self._worker_recovery_tasks: dict[
             str, tuple[str, str, int, asyncio.Task[None]]
+        ] = {}
+        self._worker_recovery_errors: dict[str, dict[str, object]] = {}
+        self._worker_resume_factories: dict[
+            str,
+            tuple[
+                str,
+                str,
+                int,
+                Callable[[WorkerRecord], Awaitable[Any]],
+                Callable[[], None] | None,
+            ],
         ] = {}
         self._schedule_worker_wakeups: dict[str, asyncio.Event] = {}
         self._subagent_coordinators: dict[str, SubAgentSessionCoordinator] = {}
@@ -257,7 +283,7 @@ class WorkspaceRecord:
         self,
         session_id: str,
         worker: WorkerRecord,
-        execution_factory: Callable[[], Any],
+        execution_factory: Callable[[WorkerRecord], Awaitable[Any]],
         *,
         release_resources: Callable[[], None] | None = None,
     ) -> None:
@@ -282,8 +308,41 @@ class WorkspaceRecord:
             if release_resources is not None:
                 release_resources()
             return
-        task = asyncio.create_task(
-            execution_factory(),
+        existing_factory = self._worker_resume_factories.get(worker.worker_id)
+        if existing_factory is None:
+            released = False
+
+            def release_once() -> None:
+                nonlocal released
+                if released:
+                    return
+                released = True
+                if release_resources is not None:
+                    release_resources()
+
+            self._worker_resume_factories[worker.worker_id] = (
+                session_id,
+                worker.parent_task_id,
+                worker.parent_generation,
+                execution_factory,
+                release_once,
+            )
+        elif release_resources is not None:
+            release_resources()
+        factory_entry = self._worker_resume_factories[worker.worker_id]
+        if worker.state == "waiting":
+            self._schedule_worker_recovery(
+                session_id,
+                worker.parent_task_id,
+                worker.parent_generation,
+                worker.worker_id,
+            )
+            return
+        async def execute_worker() -> Any:
+            return await factory_entry[3](worker)
+
+        task: asyncio.Task[Any] = asyncio.create_task(
+            execute_worker(),
             name=f"aide-worker-{worker.worker_id}",
         )
         self._worker_tasks[worker.worker_id] = (
@@ -293,26 +352,273 @@ class WorkspaceRecord:
             task,
         )
 
-        def worker_finished(completed: asyncio.Task[None]) -> None:
-            if release_resources is not None:
-                release_resources()
+        def worker_finished(completed: asyncio.Task[Any]) -> None:
             current = self._worker_tasks.get(worker.worker_id)
             if current is not None and current[3] is completed:
                 self._worker_tasks.pop(worker.worker_id, None)
             _consume_task_result(cast(asyncio.Task[object], completed))
-            try:
-                self.worker_store(session_id).recover_completed_result(worker.worker_id)
-            except (OSError, UnicodeError, ValueError, WorkerStoreError):
-                pass
-            wakeup = self._schedule_worker_wakeups.get(session_id)
-            if wakeup is not None:
-                wakeup.set()
-            self.wake_foreground_continuations()
+            self._schedule_worker_recovery(
+                session_id,
+                worker.parent_task_id,
+                worker.parent_generation,
+                worker.worker_id,
+            )
 
         task.add_done_callback(worker_finished)
 
+    def _schedule_worker_recovery(
+        self,
+        session_id: str,
+        task_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> None:
+        existing = self._worker_recovery_tasks.get(worker_id)
+        if existing is not None and not existing[3].done():
+            return
+        task = asyncio.create_task(
+            self._recover_worker_report(session_id, task_id, generation, worker_id),
+            name=f"aide-worker-report-recovery-{worker_id}",
+        )
+        self._worker_recovery_tasks[worker_id] = (
+            session_id,
+            task_id,
+            generation,
+            task,
+        )
+
+        def recovery_finished(completed: asyncio.Task[None]) -> None:
+            current = self._worker_recovery_tasks.get(worker_id)
+            if current is not None and current[3] is completed:
+                self._worker_recovery_tasks.pop(worker_id, None)
+            _consume_task_result(cast(asyncio.Task[object], completed))
+
+        task.add_done_callback(recovery_finished)
+
+    async def _recover_worker_report(
+        self,
+        session_id: str,
+        task_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> None:
+        delays = (0.5, 2.0, 5.0)
+        for attempt in range(1, len(delays) + 2):
+            try:
+                if not self._worker_recovery_is_current(
+                    session_id, task_id, generation, worker_id
+                ):
+                    self._release_worker_resources(worker_id)
+                    return
+                store = self.worker_store(session_id)
+                worker = store.get(worker_id)
+                if worker is None:
+                    self._release_worker_resources(worker_id)
+                    return
+                if worker.report is not None:
+                    self._worker_recovery_errors.pop(worker_id, None)
+                    self._finish_worker_recovery(session_id, worker_id)
+                    return
+                if worker.state == "waiting":
+                    await self._resume_worker_if_child_completed(session_id, worker)
+                    self._wake_worker_owners(session_id)
+                    return
+                if worker.state != "working":
+                    self._release_worker_resources(worker_id)
+                    return
+                recovered = store.recover_completed_result(worker_id)
+                if recovered.report is not None:
+                    self._worker_recovery_errors.pop(worker_id, None)
+                    self._finish_worker_recovery(session_id, worker_id)
+                    return
+                if recovered.state == "waiting":
+                    await self._resume_worker_if_child_completed(session_id, recovered)
+                    self._wake_worker_owners(session_id)
+                    return
+                raise WorkerStoreConflict("Worker has no recoverable completed segment")
+            except asyncio.CancelledError:
+                raise
+            except (OSError, UnicodeError, ValueError, WorkerStoreError) as error:
+                retryable = _is_transient_worker_persistence_error(error)
+                if not retryable or attempt > len(delays):
+                    await self._mark_worker_recovery_failure(
+                        session_id,
+                        task_id,
+                        generation,
+                        worker_id,
+                        attempts=attempt,
+                    )
+                    return
+                await asyncio.sleep(delays[attempt - 1])
+
+    def _worker_recovery_is_current(
+        self,
+        session_id: str,
+        task_id: str,
+        generation: int,
+        worker_id: str,
+    ) -> bool:
+        if self._closed or self._restore_blocked:
+            return False
+        if not session_id.startswith("schedule_"):
+            try:
+                if session_deletion_pending(self.workspace_state, session_id):
+                    return False
+            except OSError:
+                return False
+        partition = (
+            SessionStoragePartition.SCHEDULE
+            if session_id.startswith("schedule_")
+            else SessionStoragePartition.FOREGROUND
+        )
+        active_state = self._loops.get(session_id)
+        if active_state is None:
+            try:
+                Session.load(
+                    self.workspace_state,
+                    session_id,
+                    partition=partition,
+                    now=local_now,
+                )
+            except FileNotFoundError:
+                return False
+        elif active_state.loop.session.session_id != session_id:
+            return False
+        task = next(
+            (
+                item
+                for item in self.foreground_work_store(session_id).load().tasks
+                if item.task_id == task_id
+            ),
+            None,
+        )
+        if task is None or task.generation != generation or task.state in {
+            "cancelled",
+            "superseded",
+        }:
+            return False
+        worker = self.worker_store(session_id).get(worker_id)
+        return worker is not None
+
+    async def _mark_worker_recovery_failure(
+        self,
+        session_id: str,
+        task_id: str,
+        generation: int,
+        worker_id: str,
+        *,
+        attempts: int,
+    ) -> None:
+        diagnostic = {
+            "code": "worker_report_persistence_failed",
+            "message": "Worker result could not be saved after recovery attempts.",
+            "attempts": attempts,
+        }
+        self._worker_recovery_errors[worker_id] = diagnostic
+        try:
+            self.worker_store(session_id).set_recovery_error(
+                worker_id,
+                code=cast(str, diagnostic["code"]),
+                message=cast(str, diagnostic["message"]),
+                attempts=attempts,
+            )
+        except (OSError, UnicodeError, ValueError, WorkerStoreError):
+            logger.exception("Worker report recovery diagnostic could not be persisted: {}", worker_id)
+        try:
+            self.foreground_work_store(session_id).interrupt_worker_wait(
+                task_id, generation=generation
+            )
+        except (OSError, UnicodeError, ValueError):
+            logger.exception("Foreground Task could not be interrupted after Worker recovery failure")
+        self._wake_worker_owners(session_id)
+        await self._send_worker_snapshot(session_id)
+
+    async def _resume_worker_if_child_completed(
+        self, session_id: str, worker: WorkerRecord
+    ) -> None:
+        factory_entry = self._worker_resume_factories.get(worker.worker_id)
+        if (
+            factory_entry is None
+            or factory_entry[0] != session_id
+            or factory_entry[1] != worker.parent_task_id
+            or factory_entry[2] != worker.parent_generation
+        ):
+            return
+        children_value = worker.context_state.get("waiting_children", [])
+        if not isinstance(children_value, list):
+            raise WorkerStoreError("Worker waiting child list is invalid")
+        repository = self.subagent_repository(session_id)
+        notifications: list[dict[str, object]] = []
+        for child in children_value:
+            if not isinstance(child, dict) or not isinstance(child.get("agent_id"), str):
+                raise WorkerStoreError("Worker waiting child identity is invalid")
+            record = repository.get(cast(str, child["agent_id"]))
+            if record is None or record.source.kind is not SubAgentSourceKind.WORKER:
+                continue
+            if record.source.worker_id != worker.worker_id or record.status not in {
+                SubAgentStatus.COMPLETED,
+                SubAgentStatus.FAILED,
+                SubAgentStatus.CANCELLED,
+                SubAgentStatus.INTERRUPTED,
+            }:
+                continue
+            notifications.append(
+                {
+                    "agent_id": record.agent_id,
+                    "status": record.status.value,
+                    "terminal_revision": record.revision,
+                }
+            )
+        if not notifications:
+            return
+        try:
+            resumed = self.worker_store(session_id).resume_for_children(
+                worker.worker_id,
+                expected_revision=worker.revision,
+                notifications=notifications,
+            )
+        except WorkerStoreConflict:
+            return
+        if resumed.execution_id == worker.execution_id or resumed.state != "working":
+            return
+        self._schedule_worker_execution(
+            session_id,
+            resumed,
+            factory_entry[3],
+        )
+
+    def _wake_worker_owners(self, session_id: str) -> None:
+        wakeup = self._schedule_worker_wakeups.get(session_id)
+        if wakeup is not None:
+            wakeup.set()
+        self.wake_foreground_continuations()
+
+    def _finish_worker_recovery(self, session_id: str, worker_id: str) -> None:
+        self._worker_recovery_errors.pop(worker_id, None)
+        worker = self.worker_store(session_id).get(worker_id)
+        if worker is not None and worker.state not in {"working", "waiting"}:
+            self._release_worker_resources(worker_id)
+        self._wake_worker_owners(session_id)
+
+    def _release_worker_resources(self, worker_id: str) -> None:
+        entry = self._worker_resume_factories.pop(worker_id, None)
+        if entry is not None and entry[4] is not None:
+            entry[4]()
+
+    async def _send_worker_snapshot(self, session_id: str) -> None:
+        claim = self._claims.get(session_id)
+        if claim is None:
+            return
+        client = self.service._clients.get(claim.client_id)
+        if client is not None:
+            await self.service._send_snapshot_required(client, reason="worker_recovery_failed")
+
     async def _cancel_worker_tasks(
-        self, session_id: str, worker_ids: set[str]
+        self,
+        session_id: str,
+        worker_ids: set[str],
+        *,
+        during_shutdown: bool = False,
     ) -> None:
         tasks = tuple(
             task
@@ -324,20 +630,45 @@ class WorkspaceRecord:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        recovery_tasks = tuple(
+            task
+            for worker_id, (owner_session, _task_id, _generation, task)
+            in self._worker_recovery_tasks.items()
+            if owner_session == session_id and worker_id in worker_ids and not task.done()
+        )
+        for task in recovery_tasks:
+            task.cancel()
+        if recovery_tasks:
+            await asyncio.gather(*recovery_tasks, return_exceptions=True)
         store = self.worker_store(session_id)
-        for worker_id in worker_ids:
-            worker = store.get(worker_id)
-            if worker is None or worker.report is not None:
-                continue
-            worker = store.recover_completed_result(worker_id)
-            if worker.report is None:
-                store.publish_report(
-                    worker_id, state="cancelled",
-                    summary="Worker execution was cancelled.",
-                    error_code="turn_cancelled",
-                    error_message="Worker execution was cancelled before producing a report.",
-                    usage=worker.usage,
-                )
+        try:
+            for worker_id in worker_ids:
+                try:
+                    worker = store.get(worker_id)
+                    if worker is None or worker.report is not None:
+                        continue
+                    worker = store.recover_completed_result(worker_id)
+                    if worker.report is None:
+                        store.publish_report(
+                            worker_id,
+                            state="cancelled",
+                            summary="Worker execution was cancelled.",
+                            error_code="turn_cancelled",
+                            error_message="Worker execution was cancelled before producing a report.",
+                            usage=worker.usage,
+                        )
+                except (OSError, UnicodeError, ValueError, WorkerStoreError):
+                    if not during_shutdown:
+                        raise
+                    logger.exception(
+                        "Worker checkpoint remains for recovery after shutdown: {}",
+                        worker_id,
+                    )
+        finally:
+            for worker_id in worker_ids:
+                self._worker_recovery_errors.pop(worker_id, None)
+                self._release_worker_resources(worker_id)
+        self._wake_worker_owners(session_id)
 
     async def _cancel_worker_generation(
         self, session_id: str, task_id: str, generation: int
@@ -351,6 +682,22 @@ class WorkspaceRecord:
             and parent_generation == generation
             and not task.done()
         }
+        worker_ids.update(
+            worker_id
+            for worker_id, (owner_session, parent_task_id, parent_generation, _factory, _release)
+            in self._worker_resume_factories.items()
+            if owner_session == session_id
+            and parent_task_id == task_id
+            and parent_generation == generation
+        )
+        worker_ids.update(
+            worker_id
+            for worker_id, (owner_session, parent_task_id, parent_generation, _task)
+            in self._worker_recovery_tasks.items()
+            if owner_session == session_id
+            and parent_task_id == task_id
+            and parent_generation == generation
+        )
         worker_ids.update(
             worker.worker_id
             for worker in self.worker_store(session_id).load().workers
@@ -377,12 +724,29 @@ class WorkspaceRecord:
         for worker_id, (session_id, _task_id, _generation, task) in self._worker_tasks.items():
             if not task.done():
                 by_session.setdefault(session_id, set()).add(worker_id)
+        for worker_id, (session_id, _task_id, _generation, _factory, _release) in (
+            tuple(self._worker_resume_factories.items())
+        ):
+            worker = self.worker_store(session_id).get(worker_id)
+            if worker is not None and worker.state == "waiting":
+                self._release_worker_resources(worker_id)
+        for worker_id, (session_id, _task_id, _generation, task) in (
+            self._worker_recovery_tasks.items()
+        ):
+            if not task.done():
+                by_session.setdefault(session_id, set()).add(worker_id)
         errors: list[Exception] = []
         for session_id, worker_ids in by_session.items():
             try:
-                await self._cancel_worker_tasks(session_id, worker_ids)
+                await self._cancel_worker_tasks(
+                    session_id,
+                    worker_ids,
+                    during_shutdown=True,
+                )
             except Exception as error:
                 errors.append(error)
+        for worker_id in tuple(self._worker_resume_factories):
+            self._release_worker_resources(worker_id)
         if errors:
             raise ExceptionGroup("Worker cancellation reports could not be persisted", errors)
 
@@ -980,6 +1344,34 @@ class WorkspaceRecord:
                     and claim.status != "draining" and not run["cancel_requested"]
                 )
             live_state = {"stream_id": client.stream_id, "seq": client.sequence, "runs": runs}
+
+        def worker_snapshot(worker: WorkerRecord) -> dict[str, object]:
+            value: dict[str, object] = {
+                "worker_id": worker.worker_id,
+                "task_id": worker.task_id,
+                "generation": worker.parent_generation,
+                "state": worker.state,
+            }
+            recovery_error = self._worker_recovery_errors.get(worker.worker_id)
+            if recovery_error is None:
+                stored_error = worker.context_state.get("recovery_error")
+                recovery_error = stored_error if isinstance(stored_error, dict) else None
+            if isinstance(recovery_error, dict):
+                code = recovery_error.get("code")
+                message = recovery_error.get("message")
+                attempts = recovery_error.get("attempts")
+                if (
+                    isinstance(code, str)
+                    and isinstance(message, str)
+                    and type(attempts) is int
+                    and attempts > 0
+                ):
+                    value["recovery_error"] = {
+                        "code": code,
+                        "message": message,
+                        "attempts": attempts,
+                    }
+            return value
         return {
             "session_id": projection.session_id,
             "messages": messages,
@@ -1030,12 +1422,7 @@ class WorkspaceRecord:
                     "state": task.state,
                     "revision": foreground_work.revision,
                     "workers": [
-                        {
-                            "worker_id": worker.worker_id,
-                            "task_id": worker.task_id,
-                            "generation": worker.parent_generation,
-                            "state": worker.state,
-                        }
+                        worker_snapshot(worker)
                         for worker in worker_records
                         if worker.parent_task_id == task.task_id
                     ],
@@ -2327,6 +2714,27 @@ class WorkspaceRecord:
             return await self._continue_interrupted_children(
                 client_id, session_id, version, request_id, task, interrupted_children, expected_revision,
             )
+        worker_store = self.worker_store(session_id)
+        for worker in worker_store.load().workers:
+            if worker.parent_task_id != task_id or worker.parent_generation != task.generation:
+                continue
+            if (
+                worker.worker_id not in self._worker_recovery_errors
+                and "recovery_error" not in worker.context_state
+            ):
+                continue
+            try:
+                recovered = worker_store.recover_completed_result(worker.worker_id)
+                if recovered.report is None:
+                    worker_store.clear_recovery_error(worker.worker_id)
+                self._worker_recovery_errors.pop(worker.worker_id, None)
+            except (OSError, UnicodeError, ValueError, WorkerStoreError) as error:
+                raise service_error(
+                    "persistence_error",
+                    "Worker result recovery could not be completed; the Task remains interrupted.",
+                    status=500,
+                    retryable=True,
+                ) from error
         foreground_delivery: dict[str, object] | None = None
         for delivery in current.deliveries:
             if (
@@ -3148,7 +3556,10 @@ class WorkspaceRecord:
             foreground_task_store = self.foreground_work_store(authority.session_id)
             worker_store = self.worker_store(authority.session_id)
 
-            def schedule_worker(worker: WorkerRecord, factory: Callable[[], Any]) -> None:
+            def schedule_worker(
+                worker: WorkerRecord,
+                factory: Callable[[WorkerRecord], Awaitable[Any]],
+            ) -> None:
                 release = (
                     None if configured is None
                     else self.service._configuration_resources.retain(configured)
@@ -3293,16 +3704,30 @@ class WorkspaceRecord:
         """Publish a SubAgent event to the active claimant without a Main Run ID."""
         if event.workspace_id != self.workspace_id:
             raise ValueError("SubAgent event belongs to a different Workspace")
-        if (
-            event.kind.value == "subagent.status"
-            and event.data.get("status") in {
+        if event.kind.value == "subagent.status":
+            record = self.subagent_repository(event.session_id).get(event.agent_id)
+            if (
+                record is not None
+                and record.source.kind is SubAgentSourceKind.WORKER
+                and record.source.worker_id is not None
+                and record.status in {
+                    SubAgentStatus.COMPLETED,
+                    SubAgentStatus.FAILED,
+                    SubAgentStatus.CANCELLED,
+                    SubAgentStatus.INTERRUPTED,
+                }
+            ):
+                worker = self.worker_store(event.session_id).get(record.source.worker_id)
+                if worker is not None and worker.state == "waiting":
+                    await self._resume_worker_if_child_completed(event.session_id, worker)
+                self._wake_worker_owners(event.session_id)
+            if event.data.get("status") in {
                 SubAgentStatus.COMPLETED.value,
                 SubAgentStatus.FAILED.value,
-            }
-        ):
-            state = self._loops.get(event.session_id)
-            if state is not None and self.service.foreground_continuation_admission_open():
-                self._ensure_processor(state)
+            }:
+                state = self._loops.get(event.session_id)
+                if state is not None and self.service.foreground_continuation_admission_open():
+                    self._ensure_processor(state)
         claim = self._claims.get(event.session_id)
         target_client_ids = () if claim is None else (claim.client_id,)
         await self.service.emit(
@@ -3434,6 +3859,32 @@ class WorkspaceRecord:
 
         task = task_snapshot()
         workers = task_workers()
+        recovery_failure = next(
+            (
+                self._worker_recovery_errors.get(worker.worker_id)
+                or worker.context_state.get("recovery_error")
+                for worker in workers
+                if isinstance(
+                    self._worker_recovery_errors.get(worker.worker_id)
+                    or worker.context_state.get("recovery_error"),
+                    dict,
+                )
+            ),
+            None,
+        )
+        if isinstance(recovery_failure, dict):
+            failure_code = recovery_failure.get("code")
+            failure_message = recovery_failure.get("message")
+            raise ScheduleJobExecutionError(
+                ErrorInfo(
+                    cast(ErrorCode, failure_code)
+                    if isinstance(failure_code, str) and failure_code in STABLE_ERROR_CODES
+                    else "persistence_error",
+                    failure_message
+                    if isinstance(failure_message, str)
+                    else "Schedule Worker result recovery failed.",
+                )
+            )
         if task is not None and task.state == "waiting_for_answer":
             raise ScheduleJobExecutionError(
                 ErrorInfo(
@@ -3483,6 +3934,25 @@ class WorkspaceRecord:
                 inbound = self._claim_automatic_worker_result(state)
                 if inbound is None:
                     if not self._has_active_workers(session_id):
+                        waiting_for_children = any(
+                            worker.state == "waiting"
+                            and isinstance(worker.context_state.get("waiting_children"), list)
+                            for worker in workers
+                        )
+                        if waiting_for_children:
+                            if any(
+                                worker.state == "waiting"
+                                and worker.worker_id not in self._worker_resume_factories
+                                for worker in workers
+                            ):
+                                raise ScheduleJobExecutionError(
+                                    ErrorInfo(
+                                        "schedule_state_error",
+                                        "Schedule Worker is waiting for SubAgent recovery after Service restart.",
+                                    )
+                                )
+                            await wakeup.wait()
+                            continue
                         delivery_error = ErrorInfo(
                             "persistence_error",
                             "Schedule Worker reports could not be delivered durably.",

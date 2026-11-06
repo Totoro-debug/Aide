@@ -9,58 +9,19 @@ from aide.agent.router import (
     DispatchWorkerTool,
     FinishRouterTool,
     RouterAskUserTool,
-    RouterCatalog,
     RouterDecisionValidator,
 )
 from aide.agent.tools.context import ToolRunContext
 from aide.agent.tools.tool_gateway import ModelToolCall, ToolGateway
 
 
-def test_router_catalog_contains_only_foreground_decisions() -> None:
-    catalog = RouterCatalog()
-    assert catalog.tool_names == ("ask_user", "dispatch_worker", "finish")
-    assert not set(catalog.tool_names) & {
-        "read_file", "write_file", "edit_file", "exec", "schedule",
-        "spawn_agent", "wait_agent", "list_agents", "tool_search",
-    }
-
-
-@pytest.mark.parametrize(
-    "decision",
-    [
-        {"action": "finish", "response": "done"},
-        {"action": "ask_user", "question": "Which one?"},
-        {"action": "dispatch", "task_id": "task-1", "task": "Inspect"},
-    ],
-)
-def test_router_decisions_are_validated(decision: dict[str, str]) -> None:
-    validator = RouterDecisionValidator(session_id="session-1", workspace_id="workspace-1")
-    assert validator.validate(decision)["action"] == decision["action"]
-
-
-@pytest.mark.parametrize(
-    "decision",
-    [
-        {"action": "dispatch", "task_id": "task-1", "task": "Inspect", "session_id": "other"},
-        {"action": "dispatch", "task_id": "task-1", "task": "Inspect", "workspace_id": "other"},
-        {"action": "dispatch", "task_id": "task-1", "task": "Inspect", "worker_id": "worker-1"},
-        {"action": "exec", "command": "touch x"},
-        {"action": "dispatch", "task_id": "", "task": "Inspect"},
-    ],
-)
-def test_invalid_or_cross_owner_decisions_are_rejected(decision: dict[str, str]) -> None:
-    validator = RouterDecisionValidator(session_id="session-1", workspace_id="workspace-1")
-    with pytest.raises(ValueError):
-        validator.validate(decision)
-
-
 def test_dispatch_validation_is_bounded_and_does_not_start_a_worker() -> None:
-    validator = RouterDecisionValidator(session_id="session-1", workspace_id="workspace-1")
-    decision = validator.validate({"action": "dispatch", "task_id": "task-1", "task": "Inspect"})
-    assert decision == {"action": "dispatch", "task_id": "task-1", "task": "Inspect"}
+    validator = RouterDecisionValidator()
+    decision = validator.validate_dispatch("task-1", "Inspect", [])
+    assert decision == {"task_id": "task-1", "task": "Inspect", "context": []}
 
     with pytest.raises(ValueError):
-        validator.validate({"action": "dispatch", "task_id": "task-1", "task": "x" * 8001})
+        validator.validate_dispatch("task-1", "x" * 8001, [])
 
 
 @pytest.mark.asyncio
@@ -75,9 +36,7 @@ async def test_dispatch_tool_is_callable_through_the_public_gateway_and_is_idemp
         dispatched.append((task_id, task, tuple(context), tool_call_id))
         return "Worker report"
 
-    tool = DispatchWorkerTool(
-        RouterDecisionValidator(session_id="session-1", workspace_id=str(tmp_path))
-    )
+    tool = DispatchWorkerTool(RouterDecisionValidator())
     context = ToolRunContext(
         workspace=tmp_path,
         task_id="foreground-task",
@@ -132,9 +91,7 @@ async def test_dispatch_gateway_rejects_forged_ownership_references_without_side
         dispatched.append(task_id)
         return "Worker report"
 
-    tool = DispatchWorkerTool(
-        RouterDecisionValidator(session_id="session-1", workspace_id=str(tmp_path))
-    )
+    tool = DispatchWorkerTool(RouterDecisionValidator())
     context = ToolRunContext(
         workspace=tmp_path,
         task_id="foreground-task",

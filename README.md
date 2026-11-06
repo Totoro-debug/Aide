@@ -92,6 +92,8 @@ aide service stop
 
 **对话与项目**：Web 普通对话默认使用 `~/.aide/chat`，可在设置的「常规与外观」中更改。点击侧栏「项目」旁的「＋」选择已有目录，可让 Agent 在该目录中工作；CLI 使用启动时的当前目录作为工作区。前台输入由受限 Router 协调，Router 可并行派发持久 Worker；Worker 使用当前授权执行工具并管理自己的 SubAgent，SubAgent 不可继续创建子任务。
 
+新 Foreground Task 和用户 Schedule occurrence 默认使用 Router/Worker。需要恢复旧式单 Agent 执行时，可在 Web「设置 → 运行时」选择「Agent」，或在 `~/.aide/config.toml` 的 `[runtime]` 下设置 `execution_mode = "agent"`。模式只作用于之后创建的任务；已存在任务继续使用其保存的执行角色。切回 Router/Worker 不会撤销 Agent 已产生的文件、MCP 或其他 Tool 副作用。
+
 **历史会话**：Web 从侧栏打开历史对话；CLI 用 `/resume` 选择当前工作区的会话。同一工作区可同时运行多个会话，每个会话只能由一个客户端操作。同一服务支持一个 Web 客户端和多个 CLI 客户端。
 
 **待答问题与中断任务**：Web 会话侧栏和 CLI 的 `/resume` 列表显示待答问题来源数量及中断任务数量，不展示问题内容。打开对应会话并取得当前 Session Claim 后，Web 会展示 Router、Worker 与 SubAgent 提出的问题；CLI 会显示问题来源和 ID。单个问题可用 `/answer <text>`、`/answer --text <text>` 或 `/answer --option <id>` 回答；同一会话有多个问题时用 `/answer --question <question_id> <text>` 或配合 `--text`、`--option` 指定问题。`/task list` 查看前台任务，`/task continue <task_id>` 显式继续中断任务，`/task cancel <task_id>` 取消任务。回答和任务操作仍受当前 Session Claim 约束；服务重启后只展示待处理状态，不会自动重放。

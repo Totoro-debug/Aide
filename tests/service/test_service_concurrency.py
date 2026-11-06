@@ -117,12 +117,20 @@ class _ConcurrentProvider:
             "",
         )
         user = user_value if isinstance(user_value, str) else ""
+        try:
+            router_capsule = json.loads(user)
+        except json.JSONDecodeError:
+            router_capsule = None
+        if isinstance(router_capsule, dict) and isinstance(router_capsule.get("input"), str):
+            user = router_capsule["input"]
 
         async def emit() -> AsyncIterator[ModelStreamEvent]:
             if isinstance(system, str) and system.startswith("Generate a concise title"):
                 yield ModelCompleted(_response("Concurrent session"))
                 return
-            user_input = user.rsplit("## User Input\n\n", 1)[-1].split("\n\n## Task goal", 1)[0]
+            user_input = user.rsplit("## User Input\n\n", 1)[-1].split(
+                "\n\n## Task goal", 1
+            )[0]
             self.user_inputs.append(user_input)
             if "session-a" in user:
                 self.session_a_started.set()

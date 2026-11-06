@@ -895,7 +895,13 @@ class SubAgentPool:
                         error=record.error,
                         usage=record.usage or {},
                         terminal_record_revision=(
-                            record.revision if record.status in {SubAgentStatus.COMPLETED, SubAgentStatus.FAILED}
+                            record.revision
+                            if record.status in {
+                                SubAgentStatus.COMPLETED,
+                                SubAgentStatus.FAILED,
+                                SubAgentStatus.CANCELLED,
+                                SubAgentStatus.INTERRUPTED,
+                            }
                             else None
                         ),
                         question_id=(

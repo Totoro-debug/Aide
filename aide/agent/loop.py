@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal, NoReturn, cast
 from uuid import UUID
@@ -53,10 +54,10 @@ from aide.agent.permission import (
     ToolPermissionLevel,
 )
 from aide.agent.router import (
+    ROUTER_TOOL_NAMES,
     DispatchWorkerTool,
     FinishRouterTool,
     RouterAskUserTool,
-    RouterCatalog,
     RouterDecisionValidator,
 )
 from aide.agent.run_errors import CommittableAgentRunError
@@ -141,7 +142,9 @@ from aide.utils.validation import empty_token_usage
 type RuntimeConfirmationRequester = Callable[
     [ConfirmationEnvelope], Awaitable[ConfirmationDecision]
 ]
-type WorkerScheduler = Callable[[WorkerRecord, Callable[[], Awaitable[None]]], None]
+type WorkerScheduler = Callable[
+    [WorkerRecord, Callable[[WorkerRecord], Awaitable[WorkerRecord]]], None
+]
 type WorkerGenerationFencer = Callable[[str, int], Awaitable[None]]
 
 
@@ -483,19 +486,6 @@ class AgentRunExecutor:
             ),
             now=self._now,
             trace_recorder=self._trace_recorder,
-        )
-
-    def _subagent_tool_context_for(self, record: SubAgentRecord) -> SubAgentToolContext:
-        coordinator = self._subagent_coordinator
-        if coordinator is None:
-            raise RuntimeError("SubAgent coordinator is unavailable for this Agent Run")
-        return SubAgentToolContext(
-            coordinator=coordinator,
-            parent_run_id=record.parent_run_id,
-            source=record.source,
-            creator_snapshot=record.creator_snapshot,
-            caller_role="subagent",
-            owner_agent_id=record.agent_id,
         )
 
     def _subagent_run_gateway(
@@ -1627,6 +1617,65 @@ class AgentRunExecutor:
                     summary="",
                     permission_snapshot=permission_snapshot,
                 )
+            if router_restricted:
+                router_workers = (
+                    ()
+                    if self._worker_store is None
+                    else tuple(
+                        item
+                        for item in self._worker_store.load().workers
+                        if item.parent_task_id == task_id
+                        and item.parent_generation == task_generation
+                    )
+                )
+                summary = staged_blackboard
+                task_context: dict[str, object] = {
+                    "source": "schedule" if scheduled_run else "foreground",
+                    "session_id": active_session.session_id,
+                    "workspace_id": str(self._workspace_state.workspace_path),
+                    "task_id": task_id,
+                    "generation": task_generation,
+                    "status": None if task is None else task.state,
+                    "task_summary": (
+                        {
+                            "status": "available",
+                            "goal": summary.goal,
+                            "completion_boundary": summary.completion_boundary,
+                        }
+                        if summary is not None
+                        else {"status": "unavailable"}
+                    ),
+                    "workers": [
+                        {
+                            "worker_id": worker.worker_id,
+                            "task_id": worker.task_id,
+                            "task": worker.task,
+                            "explicit_context": list(worker.explicit_context),
+                            "status": worker.state,
+                            "report_status": (
+                                None if worker.report is None else worker.report.status
+                            ),
+                            "waiting_children": deepcopy(
+                                worker.context_state.get("waiting_children", [])
+                            ),
+                        }
+                        for worker in router_workers
+                    ],
+                }
+                if manual_invocation is not None:
+                    task_context["manual_skill"] = {
+                        "name": manual_invocation.metadata.name,
+                        "body": manual_invocation.body,
+                        "request": manual_invocation.request,
+                    }
+                return self._context_builder.build_router_messages(
+                    history,
+                    current_user=current_user,
+                    increment=increment,
+                    compaction_cursor=compaction_cursor,
+                    action_summary=action_summary,
+                    task_context=task_context,
+                )
             return self._context_builder.build_run_messages(
                 history,
                 current_user=current_user,
@@ -1708,6 +1757,11 @@ class AgentRunExecutor:
             question_id, str
         ):
             assert isinstance(execution_id, str)
+            new_task_execution_role: Literal["agent", "router"] = (
+                "router"
+                if self._configuration.runtime.execution_mode == "router_worker"
+                else "agent"
+            )
             anchor_id = next(
                 (
                     message.get("restore_anchor_id")
@@ -1750,7 +1804,7 @@ class AgentRunExecutor:
                         generation=1,
                         permission_level=permission_snapshot.level,
                         iteration_budget_limit=self._max_iterations,
-                        execution_role="router",
+                        execution_role=new_task_execution_role,
                     )
                     task_generation = 1
                 elif current_task.state == "completed":
@@ -1802,7 +1856,7 @@ class AgentRunExecutor:
                     origin_anchor_id=anchor_id,
                     permission_level=permission_snapshot.level,
                     iteration_budget_limit=self._max_iterations,
-                    execution_role="router",
+                    execution_role=new_task_execution_role,
                 )
             elif framing_result is not None and framing_result.status == "resolved":
                 if framing_result.action == "keep":
@@ -1826,7 +1880,7 @@ class AgentRunExecutor:
                             origin_anchor_id=anchor_id,
                             permission_level=permission_snapshot.level,
                             iteration_budget_limit=self._max_iterations,
-                            execution_role="router",
+                            execution_role=new_task_execution_role,
                         )
                 elif framing_result.action in {"replace", "clear"}:
                     prior_task = next(reversed(foreground_work_store.load().tasks), None)
@@ -1837,7 +1891,7 @@ class AgentRunExecutor:
                         origin_anchor_id=anchor_id,
                         permission_level=permission_snapshot.level,
                         iteration_budget_limit=self._max_iterations,
-                        execution_role="router",
+                        execution_role=new_task_execution_role,
                     )
                     if prior_task is not None and self._subagent_coordinator is not None:
                         await self._subagent_coordinator.cancel_task_and_wait(
@@ -1859,7 +1913,7 @@ class AgentRunExecutor:
                         origin_anchor_id=anchor_id,
                         permission_level=permission_snapshot.level,
                         iteration_budget_limit=self._max_iterations,
-                        execution_role="router",
+                        execution_role=new_task_execution_role,
                     )
             else:
                 foreground_work_store.interrupt_uncertain_tasks()
@@ -1871,7 +1925,7 @@ class AgentRunExecutor:
                     origin_anchor_id=anchor_id,
                     permission_level=permission_snapshot.level,
                     iteration_budget_limit=self._max_iterations,
-                    execution_role="router",
+                    execution_role=new_task_execution_role,
                 )
         router_restricted = False
         if foreground_work_store is not None and isinstance(task_id, str):
@@ -1988,17 +2042,10 @@ class AgentRunExecutor:
                     )
                 return None
 
-            def suspend_for_worker_reports(
-                tool_name: str,
-                arguments: Mapping[str, object],
-                tool_call_id: str,
-                content: str,
-            ) -> AgentRunSuspension | None:
-                del arguments, content
+            def suspend_for_worker_reports() -> AgentRunSuspension | None:
                 agent_executor = executor_reference()
                 if (
-                    tool_name != "finish"
-                    or not router_restricted
+                    not router_restricted
                     or agent_executor is None
                     or agent_executor._worker_scheduler is None
                     or agent_executor._worker_store is None
@@ -2013,6 +2060,10 @@ class AgentRunExecutor:
                     )
                     if isinstance(item, dict)
                 }
+                reports_in_input.update(
+                    (worker_id, report_id)
+                    for _tool_call_id, worker_id, report_id, _receipt_id in worker_report_receipts
+                )
                 workers = tuple(
                     worker
                     for worker in agent_executor._worker_store.load().workers
@@ -2039,8 +2090,12 @@ class AgentRunExecutor:
                     generation=task_generation,
                     execution_id=execution_id,
                     question_id=None,
-                    tool_call_id=tool_call_id,
+                    tool_call_id=None,
                 )
+
+            def completion_candidate(_content: str) -> AgentRunSuspension | None:
+                del _content
+                return suspend_for_worker_reports()
 
             def suspend_foreground_run(
                 tool_name: str,
@@ -2050,7 +2105,7 @@ class AgentRunExecutor:
             ) -> AgentRunSuspension | None:
                 return suspend_for_subagent_attention(
                     tool_name, arguments, tool_call_id, content
-                ) or suspend_for_worker_reports(tool_name, arguments, tool_call_id, content)
+                )
 
             async def dispatch_worker(
                 worker_task_id: str,
@@ -2089,26 +2144,22 @@ class AgentRunExecutor:
                     "permission_level": permission_snapshot.level,
                     "exec_shell": permission_snapshot.exec_shell.selector,
                 }
-                worker_context = list(explicit_context)
-                if manual_invocation is not None:
-                    skill_metadata = json.dumps(
-                        {
-                            "name": manual_invocation.metadata.name,
-                            "description": manual_invocation.metadata.description,
-                            "path": str(manual_invocation.metadata.path),
-                        },
-                        ensure_ascii=False,
-                        separators=(",", ":"),
-                    )
-                    worker_context.append(
-                        "Manual Skill metadata: "
-                        + skill_metadata
-                        + "\nManual Skill instructions:\n"
-                        + manual_invocation.body
-                        + "\nManual Skill request:\n"
-                        + manual_invocation.request
-                    )
-                captured_worker_context = tuple(worker_context)
+                captured_worker_context = tuple(explicit_context)
+                manual_skill_signature = (
+                    None
+                    if manual_invocation is None
+                    else sha256(
+                        json.dumps(
+                            {
+                                "name": manual_invocation.metadata.name,
+                                "body": manual_invocation.body,
+                                "request": manual_invocation.request,
+                            },
+                            ensure_ascii=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                )
                 parent_trace = current_trace_scope()
                 trace_parent_root_id = (
                     None if parent_trace is None else parent_trace.context.root_id
@@ -2118,17 +2169,12 @@ class AgentRunExecutor:
                     initial_message += "\n\nExplicit context:\n" + "\n".join(
                         f"- {item}" for item in captured_worker_context
                     )
-                system_prompt = (
-                    "You are an Aide Worker. Perform only the assigned task. You do not have the "
-                    "user's Conversation Session history. Treat the assigned task, explicit "
-                    "context, and runtime facts below as the complete input. Use only the Tools "
-                    "available in this run; Tool Gateway authorization applies to every call. "
-                    "Return a concise factual report.\n\n"
-                    "Captured authorization snapshot: "
-                    f"permission_level={permission_snapshot.level}; "
-                    f"exec_shell={permission_snapshot.exec_shell.selector}.\n"
-                    "Runtime facts: "
-                    + json.dumps(runtime_facts, ensure_ascii=True, separators=(",", ":"))
+                system_prompt = agent_executor._context_builder.worker_system_prompt(
+                    permission_level=permission_snapshot.level,
+                    exec_shell=permission_snapshot.exec_shell.selector,
+                    runtime_facts=runtime_facts,
+                    schedule_worker=scheduled_run,
+                    manual_invocation=None if scheduled_run else manual_invocation,
                 )
                 existing = worker_store.find_for_dispatch(
                     parent_task_id, parent_generation, worker_task_id
@@ -2136,6 +2182,11 @@ class AgentRunExecutor:
                 if existing is not None and (
                     existing.task != worker_task
                     or existing.explicit_context != captured_worker_context
+                    or (
+                        manual_skill_signature is not None
+                        and existing.context_state.get("manual_skill_signature")
+                        != manual_skill_signature
+                    )
                 ):
                     raise ToolError("Worker dispatch identity was reused with different input.")
 
@@ -2183,6 +2234,7 @@ class AgentRunExecutor:
                                 else str(restore_run_token)
                             ),
                             trace_parent_root_id=trace_parent_root_id,
+                            manual_skill_signature=manual_skill_signature,
                         )
                     except (OSError, UnicodeError, ValueError) as error:
                         raise ToolError("Worker assignment could not be persisted.") from error
@@ -2210,52 +2262,53 @@ class AgentRunExecutor:
                         now=agent_executor._now,
                     )
                     requester = agent_executor._confirmation_requester
-                    owner: ForegroundConfirmationOwner | BackgroundConfirmationOwner
-                    if scheduled_run:
-                        job_id = inbound.metadata.get("schedule_job_id")
-                        if not isinstance(job_id, str):
-                            job_id = active_session.session_id.removeprefix("schedule_")
-                        owner = BackgroundConfirmationOwner(
-                            generation_id=agent_executor._session_run_state.generation_id,
-                            job_id=job_id,
-                            occurrence_id=UUID(cast(str, schedule_occurrence_value)),
-                        )
-                    else:
-                        owner = ForegroundConfirmationOwner(
-                            generation_id=agent_executor._session_run_state.generation_id,
-                            run_id=UUID(worker.execution_id),
-                        )
-
-                    async def request_worker_confirmation(
-                        request: ConfirmationRequest,
-                    ) -> ConfirmationDecision:
-                        if requester is None:
-                            raise ConfirmationUnavailable(
-                                "foreground confirmation requester is not bound"
-                            )
-                        return await requester(
-                            ConfirmationEnvelope(
-                                request=request,
-                                origin="background" if scheduled_run else "foreground",
-                                owner=owner,
-                                job_id=(
-                                    owner.job_id
-                                    if isinstance(owner, BackgroundConfirmationOwner)
-                                    else None
-                                ),
-                                title=(
-                                    inbound.metadata.get("schedule_title")
-                                    if scheduled_run
-                                    and isinstance(inbound.metadata.get("schedule_title"), str)
-                                    else None
-                                ),
-                            )
-                        )
-
                     if agent_executor._worker_scheduler is not None:
-                        async def run_worker() -> None:
-                            await executor.execute(
-                                worker,
+                        async def run_worker(worker_execution: WorkerRecord) -> WorkerRecord:
+                            if scheduled_run:
+                                job_id = inbound.metadata.get("schedule_job_id")
+                                if not isinstance(job_id, str):
+                                    job_id = active_session.session_id.removeprefix("schedule_")
+                                owner: ForegroundConfirmationOwner | BackgroundConfirmationOwner = (
+                                    BackgroundConfirmationOwner(
+                                        generation_id=agent_executor._session_run_state.generation_id,
+                                        job_id=job_id,
+                                        occurrence_id=UUID(cast(str, schedule_occurrence_value)),
+                                    )
+                                )
+                            else:
+                                owner = ForegroundConfirmationOwner(
+                                    generation_id=agent_executor._session_run_state.generation_id,
+                                    run_id=UUID(worker_execution.execution_id),
+                                )
+
+                            async def request_worker_confirmation(
+                                request: ConfirmationRequest,
+                            ) -> ConfirmationDecision:
+                                if requester is None:
+                                    raise ConfirmationUnavailable(
+                                        "foreground confirmation requester is not bound"
+                                    )
+                                return await requester(
+                                    ConfirmationEnvelope(
+                                        request=request,
+                                        origin="background" if scheduled_run else "foreground",
+                                        owner=owner,
+                                        job_id=(
+                                            owner.job_id
+                                            if isinstance(owner, BackgroundConfirmationOwner)
+                                            else None
+                                        ),
+                                        title=(
+                                            inbound.metadata.get("schedule_title")
+                                            if scheduled_run
+                                            and isinstance(inbound.metadata.get("schedule_title"), str)
+                                            else None
+                                        ),
+                                    )
+                                )
+
+                            return await executor.execute(
+                                worker_execution,
                                 foreground_task_is_current=lambda parent_task, generation, _execution: (
                                     foreground_work_store.is_active_generation(
                                         parent_task, generation
@@ -2285,19 +2338,7 @@ class AgentRunExecutor:
                         )
 
                     try:
-                        worker = await executor.execute(
-                            worker,
-                            foreground_task_is_current=lambda parent_task, generation, _execution: (
-                                foreground_work_store.is_active_generation(
-                                    parent_task, generation
-                                )
-                            ),
-                            confirmation=request_worker_confirmation,
-                            cancel_requested=lambda: not foreground_work_store.is_active_generation(
-                                parent_task_id, parent_generation
-                            ),
-                            externalize_result=agent_executor._result_externalizer_for(active_session),
-                        )
+                        worker = await run_worker(worker)
                     except asyncio.CancelledError:
                         raise
                     except Exception as error:
@@ -2340,12 +2381,7 @@ class AgentRunExecutor:
             if router_restricted:
                 foreground_tools += (
                     FinishRouterTool(),
-                    DispatchWorkerTool(
-                        RouterDecisionValidator(
-                            session_id=active_session.session_id,
-                            workspace_id=str(self._workspace_state.workspace_path),
-                        )
-                    ),
+                    DispatchWorkerTool(RouterDecisionValidator()),
                 )
             foreground_context = ToolRunContext(
                 workspace=self._workspace_state.workspace_path,
@@ -2376,9 +2412,7 @@ class AgentRunExecutor:
             ),
             tool_context=foreground_context,
             run_tools=foreground_tools,
-            allowed_names=RouterCatalog().tool_names
-            if router_restricted
-            else None,
+            allowed_names=ROUTER_TOOL_NAMES if router_restricted else None,
         )
         if subagents_eligible:
             assert restore_run_token is not None
@@ -2532,6 +2566,7 @@ class AgentRunExecutor:
                 file_mutation_recorder=file_mutation_recorder,
                 run_token=restore_run_token,
                 on_first_request_prepared=notify_title_prepared,
+                on_completion_candidate=completion_candidate if router_restricted else None,
             )
         except ModelCallError as failure:
             if failure.error.code == "turn_cancelled":

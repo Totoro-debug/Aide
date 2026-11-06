@@ -1420,6 +1420,158 @@ async def test_parallel_workers_overlap_and_reports_produce_one_router_reply(
         await service.stop()
 
 
+@pytest.mark.parametrize("recovery_failures", [1, 3, 4])
+@pytest.mark.asyncio
+async def test_worker_report_recovery_retries_checkpoint_without_replaying_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    recovery_failures: int,
+) -> None:
+    home = _home(tmp_path / "home")
+    directory = tmp_path / "workspace"
+    directory.mkdir()
+    provider = _ParallelWorkerProvider()
+    monkeypatch.setattr(service_runtime, "create_provider", lambda _configuration: provider)
+    service = AgentService(home, ConfigLoader(home).load())
+    await service.start()
+    try:
+        client = await service.register_client("cli")
+        await service.connect_client(client.client_id, _SilentSink())
+        workspace = await service.attach_workspace(client.client_id, directory)
+        opened = await service.open_conversation(
+            client.client_id,
+            workspace_id=workspace.workspace_id,
+            create_new=True,
+        )
+        session_id = opened["session_id"]
+        claim = cast(dict[str, object], opened["claim"])
+        claim_version = cast(int, claim["claim_version"])
+        await service.handle_command(
+            client.client_id,
+            {
+                "request_id": "worker-report-recovery-input",
+                "type": "input",
+                "workspace_id": workspace.workspace_id,
+                "session_id": session_id,
+                "claim_version": claim_version,
+                "payload": {"text": "Run both independent checks."},
+            },
+        )
+        await asyncio.wait_for(provider.two_workers_started.wait(), timeout=10)
+        await _wait_until(
+            lambda: cast(
+                list[dict[str, object]],
+                workspace.session_snapshot(session_id)["foreground_tasks"],
+            )[0]["state"]
+            == "waiting_for_workers"
+        )
+
+        store = workspace.worker_store(session_id)
+        publish_report = store.publish_report
+        report_attempts: dict[str, int] = {}
+        allow_recovery = False
+
+        def fail_report_writes(worker_id: str, **kwargs: Any) -> Any:
+            attempt = report_attempts.get(worker_id, 0) + 1
+            report_attempts[worker_id] = attempt
+            if not allow_recovery and attempt <= recovery_failures + 1:
+                raise OSError("injected Worker report write failure")
+            return publish_report(worker_id, **kwargs)
+
+        monkeypatch.setattr(store, "publish_report", fail_report_writes)
+        actual_sleep = asyncio.sleep
+        recovery_delays: list[float] = []
+
+        async def skip_recovery_delay(delay: float) -> None:
+            if delay in {0.5, 2.0, 5.0}:
+                recovery_delays.append(delay)
+            await actual_sleep(0)
+
+        monkeypatch.setattr(asyncio, "sleep", skip_recovery_delay)
+        provider.release_workers.set()
+
+        if recovery_failures < 4:
+            await asyncio.wait_for(provider.report_continuation_started.wait(), timeout=10)
+            assert sorted(recovery_delays) == sorted(
+                [0.5, 2.0, 5.0][:recovery_failures] * 2
+            )
+            assert set(report_attempts.values()) == {recovery_failures + 2}
+        else:
+            await _wait_until(
+                lambda: cast(
+                    list[dict[str, object]],
+                    workspace.session_snapshot(session_id)["foreground_tasks"],
+                )[0]["state"]
+                == "interrupted"
+            )
+            task_snapshot = cast(
+                list[dict[str, object]],
+                workspace.session_snapshot(session_id)["foreground_tasks"],
+            )[0]
+            recovery_errors = [
+                worker.get("recovery_error")
+                for worker in cast(list[dict[str, object]], task_snapshot["workers"])
+            ]
+            assert all(
+                error == {
+                    "code": "worker_report_persistence_failed",
+                    "message": "Worker result could not be saved after recovery attempts.",
+                    "attempts": 4,
+                }
+                for error in recovery_errors
+            )
+            assert sorted(recovery_delays) == sorted([0.5, 2.0, 5.0] * 2)
+            assert set(report_attempts.values()) == {5}
+            await actual_sleep(0.01)
+            assert set(report_attempts.values()) == {5}
+
+            allow_recovery = True
+            provider.release_report_continuation.set()
+            work = workspace.foreground_work_store(session_id).load()
+            await workspace.continue_task(
+                client.client_id,
+                session_id,
+                claim_version,
+                cast(str, task_snapshot["task_id"]),
+                work.revision,
+                "continue-after-worker-report-recovery",
+            )
+
+        provider.release_report_continuation.set()
+        await _wait_until(
+            lambda: not cast(
+                list[dict[str, object]],
+                cast(dict[str, object], workspace.session_snapshot(session_id)["live_state"])[
+                    "runs"
+                ],
+            )
+        )
+        workers = store.load().workers
+        assert len(workers) == 2
+        assert provider.worker_started == 2
+        assert all(worker.state == "ready" and worker.report is not None for worker in workers)
+        if recovery_failures < 4:
+            assert set(report_attempts.values()) == {recovery_failures + 2}
+        else:
+            assert set(report_attempts.values()) == {6}
+            assert all("recovery_error" not in worker.context_state for worker in workers)
+        messages = cast(list[dict[str, object]], workspace.session_snapshot(session_id)["messages"])
+        dispatch_calls = [
+            call
+            for message in messages
+            for call in cast(list[dict[str, object]], message.get("tool_calls", []))
+            if call.get("name") == "dispatch_worker"
+        ]
+        assert {
+            json.loads(cast(str, call["arguments"]))["task_id"]
+            for call in dispatch_calls
+        } == {"first-check", "second-check"}
+    finally:
+        provider.release_workers.set()
+        provider.release_report_continuation.set()
+        await service.stop()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("client_kind", ["cli", "web"])
 async def test_parallel_workers_manage_owned_subagent_results_before_router_report(

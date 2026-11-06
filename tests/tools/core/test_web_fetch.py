@@ -133,7 +133,7 @@ def test_web_fetch_schema_declares_format_and_max_chars() -> None:
                         "type": "integer",
                         "description": "Maximum returned characters.",
                         "minimum": 1,
-                        "default": 50000,
+                        "default": 65535,
                     },
                 },
                 "required": ["url"],

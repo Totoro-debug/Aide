@@ -11,7 +11,7 @@ from aide.agent.permission import PermissionSnapshot
 from aide.agent.session.session import Session
 from aide.agent.tools.core.exec_policy import ResolvedExecShell
 from aide.agent.workers.models import WorkerRecord, WorkerReportStatus
-from aide.agent.workers.store import WorkerStore, WorkerStoreConflict
+from aide.agent.workers.store import WorkerStore
 from aide.agent.workspace_state import WorkspaceState
 from aide.provider.session_configuration import SessionModelConfiguration
 
@@ -115,26 +115,63 @@ def test_worker_state_context_and_report_survive_store_recreation(tmp_path: Path
     assert recovered.report_delivery_state == "pending"
 
 
-def test_worker_status_transitions_accept_wait_and_reject_terminal_reversal(
-    tmp_path: Path,
-) -> None:
+def test_worker_child_wait_resumes_once_and_finishes_its_segment(tmp_path: Path) -> None:
     store, _session_id = _create_store(tmp_path)
     worker = _create_worker(store)
-
-    waiting = store.transition(worker.worker_id, "waiting")
-    resumed = store.transition(worker.worker_id, "working")
-    assert waiting.state == "waiting"
-    assert resumed.state == "working"
-
-    ready = store.publish_report(
-        worker.worker_id,
-        state="ready",
-        summary="done",
-        usage={"model_calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+    child_id = str(uuid4())
+    conversation = (
+        *worker.conversation,
+        {"role": "assistant", "content": "Waiting for child work.", "status": "completed"},
     )
+    usage = {"model_calls": 1, "input_tokens": 4, "output_tokens": 2, "total_tokens": 6}
+    waiting = store.suspend_for_children(
+        worker.worker_id,
+        expected_revision=worker.revision,
+        conversation=conversation,
+        context_state=worker.context_state,
+        usage=usage,
+        children=[{"agent_id": child_id, "status": "running", "terminal_revision": None}],
+    )
+    resumed = store.resume_for_children(
+        worker.worker_id,
+        expected_revision=waiting.revision,
+        notifications=[
+            {"agent_id": child_id, "status": "completed", "terminal_revision": 3}
+        ],
+    )
+    assert waiting.state == "waiting"
+    assert store.recover_completed_result(waiting.worker_id).report is None
+    assert resumed.state == "working"
+    assert resumed.execution_id != worker.execution_id
+    assert resumed.conversation[-1]["role"] == "user"
+    assert "Child result inspected" not in resumed.conversation[-1]["content"]
+    duplicate = store.resume_for_children(
+        worker.worker_id,
+        expected_revision=waiting.revision,
+        notifications=[
+            {"agent_id": child_id, "status": "completed", "terminal_revision": 3}
+        ],
+    )
+    assert duplicate.revision == resumed.revision
+
+    completed_messages = (
+        *resumed.conversation,
+        {"role": "assistant", "content": "Child result inspected.", "status": "completed"},
+    )
+    checkpointed = store.checkpoint(
+        resumed.worker_id,
+        conversation=completed_messages,
+        context_state=resumed.context_state,
+        usage=usage,
+    )
+    terminal_segment = store.finish_completed_segment(
+        checkpointed.worker_id,
+        expected_revision=checkpointed.revision,
+        context_state=checkpointed.context_state,
+    )
+    ready = store.recover_completed_result(terminal_segment.worker_id)
     assert ready.state == "ready"
-    with pytest.raises(WorkerStoreConflict):
-        store.transition(worker.worker_id, "working")
+    assert ready.report is not None
 
 
 @pytest.mark.parametrize("terminal_state", ["ready", "blocked", "failed", "cancelled"])
@@ -539,7 +576,7 @@ async def test_worker_executor_continues_its_reloaded_tool_checkpoint(tmp_path: 
             cancel_requested=lambda: False,
         )
         assert terminal.report is not None
-        assert terminal.report.status == "ready"
+        assert terminal.report.status == "ready", terminal.report.to_dict()
         assert terminal.report.summary == "First line: checkpoint-only evidence"
         assert len(provider.stream_requests) == 1
         assert any(

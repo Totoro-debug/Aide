@@ -32,6 +32,7 @@ DEFAULT_CONFIG_TEMPLATE: Final = load_template("default-config.md")
 type MCPTransport = Literal["stdio", "streamable-http"]
 type PermissionLevel = Literal["read-only", "workspace-write", "full-access"]
 type ExecShell = Literal["auto", "powershell", "pwsh"]
+type ExecutionMode = Literal["router_worker", "agent"]
 
 _PROVIDER_ID_PATTERN: Final = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _MCP_NAME_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -47,6 +48,7 @@ _DEFAULT_ENABLE_TOOL_MICRO_COMPRESSION: Final = False
 _DEFAULT_COMPACT_RATIO: Final = 0.9
 _DEFAULT_PERMISSION_LEVEL: Final[PermissionLevel] = "workspace-write"
 _DEFAULT_EXEC_SHELL: Final[ExecShell] = "auto"
+_DEFAULT_EXECUTION_MODE: Final[ExecutionMode] = "router_worker"
 _DEFAULT_MEMORY_BATCH_SIZE: Final = 10
 _DEFAULT_MEMORY_SCHEDULE: Final = "0 * * * *"
 _DEFAULT_REASONING_EFFORT: Final[ReasoningEffort] = "mid"
@@ -130,6 +132,7 @@ class RuntimeConfiguration:
     compact_ratio: float = _DEFAULT_COMPACT_RATIO
     permission_level: PermissionLevel = _DEFAULT_PERMISSION_LEVEL
     exec_shell: ExecShell = _DEFAULT_EXEC_SHELL
+    execution_mode: ExecutionMode = _DEFAULT_EXECUTION_MODE
     enable_tool_micro_compression: bool = _DEFAULT_ENABLE_TOOL_MICRO_COMPRESSION
 
 
@@ -807,6 +810,12 @@ def _parse_default_exec_shell(value: object) -> ExecShell | None:
     return cast(ExecShell, value)
 
 
+def _parse_default_execution_mode(value: object) -> ExecutionMode | None:
+    if not isinstance(value, str) or value not in {"router_worker", "agent"}:
+        return None
+    return cast(ExecutionMode, value)
+
+
 def _parse_runtime(
     document: Mapping[str, object],
     *,
@@ -868,6 +877,14 @@ def _parse_runtime(
             field="runtime.exec_shell",
             default=_DEFAULT_EXEC_SHELL,
             parse=_parse_default_exec_shell,
+            diagnostics=diagnostics,
+        ),
+        execution_mode=_defaulted(
+            table,
+            "execution_mode",
+            field="runtime.execution_mode",
+            default=_DEFAULT_EXECUTION_MODE,
+            parse=_parse_default_execution_mode,
             diagnostics=diagnostics,
         ),
     )
@@ -1366,6 +1383,7 @@ def _editable_configuration_fields(
             "compact_ratio": configuration.runtime.compact_ratio,
             "permission_level": configuration.runtime.permission_level,
             "exec_shell": configuration.runtime.exec_shell,
+            "execution_mode": configuration.runtime.execution_mode,
         },
         "memory": {
             "batch_size": configuration.memory.batch_size,
@@ -1472,6 +1490,10 @@ def _editable_field_value(section: str, field: str, value: object) -> object:
         if field == "exec_shell":
             if _parse_default_exec_shell(value) is None:
                 raise ConfigFieldError(name, "must be auto, powershell, or pwsh")
+            return value
+        if field == "execution_mode":
+            if _parse_default_execution_mode(value) is None:
+                raise ConfigFieldError(name, "must be router_worker or agent")
             return value
     elif section == "memory":
         if field == "batch_size":

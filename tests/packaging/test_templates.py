@@ -14,6 +14,7 @@ TEMPLATE_NAMES = {
     "long-term-memory.md",
     "memory-task-prompt.md",
     "mcp-keyword-system-prompt.md",
+    "router-system-prompt.md",
     "session-title-prompt.md",
     "skill-always-load.md",
     "skill-catalog.md",

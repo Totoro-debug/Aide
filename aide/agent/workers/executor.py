@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from aide.agent.context.builder import ContextBuilder
@@ -19,6 +19,7 @@ from aide.agent.subagents.models import (
     SubAgentCreatorSnapshot,
     SubAgentSource,
     SubAgentSourceKind,
+    SubAgentStatus,
 )
 from aide.agent.subagents.ports import SubAgentSessionCoordinator
 from aide.agent.tools.context import ToolRunContext
@@ -35,6 +36,7 @@ from aide.trace.recorder import NoOpTraceRecorder, TraceRecorder
 from aide.trace.scope import current_trace_scope, trace_scope
 from aide.trace.types import TraceOrigin, TracePurpose
 from aide.utils.errors import ErrorInfo
+from aide.utils.json import strict_json_loads
 from aide.utils.validation import empty_token_usage
 
 _SUBAGENT_TOOL_NAMES = ("spawn_agent", "wait_agent", "list_agents")
@@ -113,6 +115,17 @@ class WorkerRunnerExecutor:
             return self._failed(
                 worker,
                 ErrorInfo("tool_failed", "The captured Worker Exec shell is unavailable."),
+            )
+
+        remaining_iterations = self._max_iterations - worker.usage["model_calls"]
+        if remaining_iterations < 1:
+            return self._store.publish_report(
+                worker.worker_id,
+                state="blocked",
+                summary="Worker reached its cumulative execution limit.",
+                error_code="agent_iteration_limit",
+                error_message="Worker reached its cumulative execution limit.",
+                usage=worker.usage,
             )
 
         parent_execution_id = worker.runtime_facts.get("foreground_execution_id")
@@ -285,11 +298,10 @@ class WorkerRunnerExecutor:
                     next_state.pop("summary", None)
                 else:
                     next_state["summary"] = context_values.pending_action_summary
-                combined_usage = _combined_usage(
-                    worker.usage,
-                    runner_usage,
-                    context_values.usage_delta,
-                )
+                combined_usage = {
+                    field: worker.usage[field] + runner_usage[field] + context_values.usage_delta[field]
+                    for field in _USAGE_FIELDS
+                }
                 current_record[0] = self._store.checkpoint(
                     current_worker.worker_id,
                     conversation=(*current_worker.conversation, *appended),
@@ -307,7 +319,7 @@ class WorkerRunnerExecutor:
                     confirmation=confirmation,
                     externalize_result=externalize_result,
                     cancel_requested=cancel_requested,
-                    max_iterations=self._max_iterations,
+                    max_iterations=remaining_iterations,
                     file_mutation_recorder=(
                         None
                         if self._schedule_session
@@ -328,6 +340,32 @@ class WorkerRunnerExecutor:
                     "interactive_terminal_required", "Schedule Worker Tool confirmation is unavailable.",
                 ))
             if result.finish_reason == "completed":
+                children, unread_notified = self._children_to_wait(current_record[0])
+                if unread_notified:
+                    return self._store.publish_report(
+                        worker.worker_id,
+                        state="blocked",
+                        summary="Worker finished without reading a notified SubAgent result.",
+                        error_code="worker_subagent_result_not_read",
+                        error_message="Call wait_agent to read each notified SubAgent result before completing.",
+                        usage=current_record[0].usage,
+                    )
+                if children:
+                    current = current_record[0]
+                    return self._store.suspend_for_children(
+                        worker.worker_id,
+                        expected_revision=current.revision,
+                        conversation=current.conversation,
+                        context_state=current.context_state,
+                        usage=current.usage,
+                        children=children,
+                    )
+                current = current_record[0]
+                current_record[0] = self._store.finish_completed_segment(
+                    worker.worker_id,
+                    expected_revision=current.revision,
+                    context_state=current.context_state,
+                )
                 state: WorkerReportStatus = "ready"
                 summary = result.final_content or "Worker completed without a text response."
             elif result.finish_reason == "suspended":
@@ -370,6 +408,107 @@ class WorkerRunnerExecutor:
                 current_record[0],
                 ErrorInfo("model_failed", "Worker execution failed."),
             )
+
+    def _children_to_wait(
+        self, worker: WorkerRecord
+    ) -> tuple[list[dict[str, object]], bool]:
+        coordinator = self._subagent_coordinator
+        if coordinator is None:
+            return [], False
+        source = SubAgentSource(
+            kind=SubAgentSourceKind.WORKER,
+            restore_run_token=worker.restore_run_token,
+            task_id=worker.parent_task_id,
+            task_generation=worker.parent_generation,
+            worker_id=worker.worker_id,
+        )
+        read_versions = self._read_child_versions(worker.conversation)
+        notified_value = worker.context_state.get("child_notifications", [])
+        notified_versions = {
+            (item.get("agent_id"), item.get("terminal_revision"))
+            for item in notified_value
+            if isinstance(item, dict)
+        } if isinstance(notified_value, list) else set()
+        unread_notified = False
+        waiting: list[dict[str, object]] = []
+        cursor: str | None = None
+        while True:
+            page = coordinator.list(source=source, cursor=cursor, limit=100)
+            for item in page.items:
+                record = coordinator.get(item.agent_id)
+                if record is None or record.source != source:
+                    continue
+                terminal = record.status in {
+                    SubAgentStatus.COMPLETED,
+                    SubAgentStatus.FAILED,
+                    SubAgentStatus.CANCELLED,
+                    SubAgentStatus.INTERRUPTED,
+                }
+                if terminal:
+                    identity = (record.agent_id, record.revision)
+                    if identity in read_versions:
+                        continue
+                    if identity in notified_versions:
+                        unread_notified = True
+                        continue
+                    waiting.append(
+                        {
+                            "agent_id": record.agent_id,
+                            "status": record.status.value,
+                            "terminal_revision": record.revision,
+                        }
+                    )
+                else:
+                    waiting.append(
+                        {
+                            "agent_id": record.agent_id,
+                            "status": record.status.value,
+                            "terminal_revision": None,
+                        }
+                    )
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        return waiting, unread_notified
+
+    @staticmethod
+    def _read_child_versions(
+        conversation: Sequence[Mapping[str, Any]],
+    ) -> set[tuple[str, int]]:
+        terminal_statuses = {
+            SubAgentStatus.COMPLETED.value,
+            SubAgentStatus.FAILED.value,
+            SubAgentStatus.CANCELLED.value,
+            SubAgentStatus.INTERRUPTED.value,
+        }
+        read: set[tuple[str, int]] = set()
+        for message in conversation:
+            if (
+                message.get("role") != "tool"
+                or message.get("name") != "wait_agent"
+                or message.get("status") != "success"
+                or not isinstance(message.get("content"), str)
+            ):
+                continue
+            try:
+                value = strict_json_loads(cast(str, message["content"]))
+            except ValueError:
+                continue
+            if not isinstance(value, list):
+                continue
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                agent_id = item.get("agent_id")
+                revision = item.get("terminal_record_revision")
+                if (
+                    isinstance(agent_id, str)
+                    and item.get("status") in terminal_statuses
+                    and type(revision) is int
+                    and revision > 0
+                ):
+                    read.add((agent_id, revision))
+        return read
 
     def _failed(self, worker: WorkerRecord, error: ErrorInfo) -> WorkerRecord:
         current = self._store.get(worker.worker_id)
@@ -419,14 +558,6 @@ class WorkerRunnerExecutor:
             ),
         )
         return trace_scope(self._trace_recorder, source)
-
-
-def _combined_usage(*values: Mapping[str, int]) -> dict[str, int]:
-    combined = empty_token_usage()
-    for value in values:
-        for field in _USAGE_FIELDS:
-            combined[field] += value[field]
-    return combined
 
 
 __all__ = ["WorkerRunnerExecutor"]

@@ -476,9 +476,23 @@ async def test_cli_answers_two_subagents_independently(
                     provider.router_report_texts,
                 )
             ) from error
-        async with asyncio.timeout(30):
-            while len(app._foreground_questions) != 2:
-                await pilot.pause()
+        service_client = cast(Any, app._management_dispatcher).client
+        try:
+            async with asyncio.timeout(30):
+                while len(app._foreground_questions) != 2:
+                    await pilot.pause()
+        except TimeoutError as error:
+            subagents = await service_client._http_request(
+                "GET",
+                f"/api/v1/workspaces/{service_client.workspace_id}/sessions/"
+                f"{service_client.session_id}/subagents",
+            )
+            raise AssertionError(
+                f"questions={app._foreground_questions!r}; tasks={app._foreground_tasks!r}; "
+                f"subagents={subagents!r}; child_questions={provider.child_question_count}; "
+                f"wait_requested={provider.question_wait_requested}; "
+                f"tool_names={provider.worker_tool_names!r}; requests={provider.requests[-6:]!r}"
+            ) from error
         question_ids = [str(item["question_id"]) for item in app._foreground_questions]
         assert len(set(question_ids)) == 2
         assert str(widget.content).count("SubAgent") == 2
@@ -487,8 +501,6 @@ async def test_cli_answers_two_subagents_independently(
             str(item["question_id"]): str(item["owner_agent_id"])
             for item in app._foreground_questions
         }
-        service_client = cast(Any, app._management_dispatcher).client
-
         async def child_status(agent_id: str) -> str | None:
             page = await service_client._http_request(
                 "GET",

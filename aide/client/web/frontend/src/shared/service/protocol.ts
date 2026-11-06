@@ -174,6 +174,7 @@ export interface ConfigFields {
     compact_ratio: number;
     permission_level: ToolPermissionLevel;
     exec_shell: "auto" | "powershell" | "pwsh";
+    execution_mode: "router_worker" | "agent";
   };
   memory: {
     batch_size: number;
@@ -598,6 +599,7 @@ export interface ForegroundWorkerSnapshot {
   task_id: string;
   generation: number;
   state: "working" | "waiting" | "ready" | "blocked" | "failed" | "cancelled";
+  recovery_error?: { code: string; message: string; attempts: number };
 }
 
 export interface ForegroundQuestionSnapshot {

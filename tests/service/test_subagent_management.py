@@ -460,6 +460,42 @@ class _DelegatingProvider:
             if message.get("role") == "tool"
         ]
 
+        if "SubAgent status update; results are not included." in latest_user_text:
+            notified_ids = [
+                line.split("agent_id=", 1)[1].split()[0]
+                for line in latest_user_text.splitlines()
+                if "agent_id=" in line
+            ]
+            wait_result = next(
+                (
+                    item
+                    for item in current_tool_results
+                    if item.get("tool_call_id") == "question-resume-wait"
+                ),
+                None,
+            )
+            if wait_result is None:
+                if "wait_agent" not in tool_names:
+                    return self._events(
+                        "",
+                        tool_call=ModelToolCall(
+                            "question-resume-search",
+                            "tool_search",
+                            '{"query":"wait agent"}',
+                        ),
+                    )
+                self.question_wait_requested = True
+                return self._events(
+                    "",
+                    tool_call=ModelToolCall(
+                        "question-resume-wait",
+                        "wait_agent",
+                        json.dumps({"agent_ids": notified_ids}),
+                    ),
+                )
+            self.wait_result_contents = [str(wait_result.get("content", ""))]
+            return self._events("Worker incorporated its SubAgent result.")
+
         if "SubAgent result for automatic continuation:" in latest_user_text:
             self.automatic_continuation_count += 1
             self.automatic_continuation_started.set()
@@ -994,6 +1030,34 @@ class _BatchDelegatingProvider(_DelegatingProvider):
         router_response = self._router_worker_response(messages, tool_names)
         if router_response is not None:
             return router_response
+        if "SubAgent status update; results are not included." in latest_user_text:
+            notified_ids = [
+                line.split("agent_id=", 1)[1].split()[0]
+                for line in latest_user_text.splitlines()
+                if "agent_id=" in line
+            ]
+            wait_result = next(
+                (
+                    item
+                    for item in messages
+                    if item.get("role") == "tool"
+                    and item.get("tool_call_id") == "batch-worker-wait"
+                ),
+                None,
+            )
+            if wait_result is None:
+                return self._events(
+                    "",
+                    tool_call=ModelToolCall(
+                        "batch-worker-wait",
+                        "wait_agent",
+                        json.dumps({"agent_ids": notified_ids}),
+                    ),
+                )
+            return self._events(
+                "Worker read the completed results: "
+                + " ".join(self.batch_child_results[index] for index in sorted(self.batch_child_results))
+            )
         if "batch delegation request" in latest_user_text:
             completed = {
                 item.get("tool_call_id")

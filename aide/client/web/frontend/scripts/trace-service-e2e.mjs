@@ -35,10 +35,10 @@ try {
     .filter(record => record.kind === "tool")
     .map(record => record.tool_name)
     .sort(), { timeout: 30000 }).toEqual([
-    "dispatch_worker", "finish", "finish", "read_file", "read_file",
+    "dispatch_worker", "finish", "read_file", "read_file",
   ]);
   await expect.poll(async () => (await records()).filter(record => record.kind === "model"
-    && record.purpose === "agent_run").length, { timeout: 30000 }).toBe(6);
+    && record.purpose === "agent_run").length, { timeout: 30000 }).toBe(5);
   const persisted = await records();
   const tools = persisted.filter(record => record.kind === "tool");
   const tool = tools.find(record => record.tool_name === "read_file");

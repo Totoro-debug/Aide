@@ -23,6 +23,7 @@ from aide.agent.runner import (
     AgentRunnerToolCallStarted,
 )
 from aide.agent.tools.base import ArtifactReference
+from aide.agent.tools.context import AgentRunSuspension
 from aide.agent.tools.core.write_file import WriteFileTool
 from aide.agent.tools.tool_gateway import (
     ConfirmationDecision,
@@ -999,6 +1000,110 @@ async def test_runner_emits_completed_content_when_provider_omits_text_deltas() 
         "Completed without deltas"
     ]
     assert isinstance(events[-1], AgentRunnerResponseSegmentEnd)
+
+
+@pytest.mark.asyncio
+async def test_completion_candidate_can_suspend_plain_text_without_persisting_it() -> None:
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    TextDelta(delta="Provisional answer"),
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(content="Provisional answer"),
+                            usage=ModelUsage(input_tokens=2, output_tokens=2, total_tokens=4),
+                            finish_reason="stop",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+    suspension = AgentRunSuspension(
+        kind="worker_reports",
+        task_id="task-1",
+        generation=1,
+        execution_id="execution-1",
+        question_id=None,
+        tool_call_id=None,
+    )
+    events: list[object] = []
+
+    result = await _runner(ScriptedFakeRouter(provider)).run(
+        [{"role": "user", "content": "Request"}],
+        model="chat",
+        tool_gateway=None,
+        on_output=lambda event: _observe(events, event),
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+        on_completion_candidate=lambda content: suspension if content == "Provisional answer" else None,
+    )
+
+    assert result.finish_reason == "suspended"
+    assert result.suspension is suspension
+    assert result.final_content == ""
+    assert result.messages == []
+    assert "".join(event.delta for event in events if isinstance(event, TextDelta)) == "Provisional answer"
+
+
+@pytest.mark.asyncio
+async def test_finish_completion_candidate_can_suspend_after_tool_result() -> None:
+    from aide.agent.router import FinishRouterTool
+
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                events=(
+                    ModelCompleted(
+                        response=ModelResponse(
+                            message=AssistantModelMessage(
+                                content="",
+                                tool_calls=(ModelToolCall(
+                                    "finish-call", "finish", '{"response":"Provisional answer"}'
+                                ),),
+                            ),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+    suspension = AgentRunSuspension(
+        kind="worker_reports",
+        task_id="task-1",
+        generation=1,
+        execution_id="execution-1",
+        question_id=None,
+        tool_call_id=None,
+    )
+    events: list[object] = []
+
+    result = await _runner(ScriptedFakeRouter(provider)).run(
+        [{"role": "user", "content": "Request"}],
+        model="chat",
+        tool_gateway=SingleToolGateway([FinishRouterTool()]),
+        on_output=lambda event: _observe(events, event),
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=50,
+        on_completion_candidate=lambda content: suspension if content == "Provisional answer" else None,
+    )
+
+    assert result.finish_reason == "suspended"
+    assert result.suspension is suspension
+    assert result.final_content == ""
+    assert result.messages[-1]["role"] == "tool"
+    assert all(message.get("router_finish_call_id") is None for message in result.messages)
+    assert all(
+        not isinstance(event, TextDelta) or event.delta != "Provisional answer"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio
@@ -2557,7 +2662,7 @@ async def test_runner_normalizes_externalizer_failure_to_safe_tool_error() -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", (49, 0, True, 50.0))
+@pytest.mark.parametrize("value", (0, True, 50.0))
 async def test_runner_rejects_invalid_max_iterations(value: object) -> None:
     runner = _runner(ScriptedFakeRouter(ScriptedFakeProvider()))
 
@@ -2572,6 +2677,40 @@ async def test_runner_rejects_invalid_max_iterations(value: object) -> None:
             cancel_requested=None,
             max_iterations=value,
         )
+
+
+@pytest.mark.asyncio
+async def test_runner_accepts_a_positive_remaining_iteration_budget() -> None:
+    provider = ScriptedFakeProvider(
+        streams=(
+            StreamScript(
+                (
+                    ModelCompleted(
+                        ModelResponse(
+                            AssistantModelMessage("One request is allowed."),
+                            ModelUsage(1, 1, 2),
+                            "stop",
+                        )
+                    ),
+                )
+            ),
+        )
+    )
+    runner = _runner(ScriptedFakeRouter(provider))
+
+    result = await runner.run(
+        [],
+        model="chat",
+        tool_gateway=None,
+        on_output=_ignore_output,
+        confirmation=None,
+        externalize_result=None,
+        cancel_requested=None,
+        max_iterations=1,
+    )
+
+    assert result.finish_reason == "completed"
+    assert len(provider.stream_requests) == 1
 
 
 @pytest.mark.asyncio

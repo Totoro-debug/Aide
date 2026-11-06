@@ -66,6 +66,10 @@ class WorkerReport:
             "usage": deepcopy(self.usage),
         }
 
+    @property
+    def receipt_id(self) -> str:
+        return f"worker-report:{self.worker_id}:{self.sequence}"
+
 
 @dataclass(frozen=True, slots=True)
 class WorkerRecord:
@@ -175,7 +179,7 @@ class WorkerRecord:
                 raise ValueError("Worker report status must match its Worker")
             if self.report_delivery_state not in _DELIVERY_STATES:
                 raise ValueError("Worker report delivery state is required")
-            stable_receipt = _receipt_id(self.worker_id, self.report.sequence)
+            stable_receipt = self.report.receipt_id
             if self.report_delivery_state in {"claimed", "consumed"}:
                 if self.report_receipt_id != stable_receipt:
                     raise ValueError("Worker report receipt is invalid")
@@ -232,12 +236,8 @@ class WorkerReportDelivery:
     def __post_init__(self) -> None:
         if not isinstance(self.report, WorkerReport):
             raise TypeError("Worker report delivery requires a WorkerReport")
-        if self.receipt_id != _receipt_id(self.report.worker_id, self.report.sequence):
+        if self.receipt_id != self.report.receipt_id:
             raise ValueError("Worker report delivery receipt is invalid")
-
-
-def _receipt_id(worker_id: str, sequence: int) -> str:
-    return f"worker-report:{worker_id}:{sequence}"
 
 
 def _report_from_value(value: object) -> WorkerReport | None:

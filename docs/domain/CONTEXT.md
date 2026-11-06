@@ -97,7 +97,7 @@ The restricted Agent execution that coordinates one foreground input or Schedule
 _Avoid_: Main Agent, Worker, SubAgent
 
 **Worker**:
-A persistent, independently contextualized Agent execution assigned a bounded task by a Router. It uses existing authorized Tools, can manage its own SubAgents and Schedule Jobs, and returns a durable report to its Router.
+A persistent, independently contextualized Agent execution assigned a bounded task by a Router. It uses existing authorized Tools, can manage its own SubAgents and Schedule Jobs, may suspend a segment while awaiting SubAgent results, and returns a durable report to its Router only after required results have been read.
 _Avoid_: Router, Main Agent, SubAgent, separate Conversation Session
 
 **SubAgent**:
@@ -113,7 +113,7 @@ The execution capacity and waiting queue owned by one Conversation Session for i
 _Avoid_: Agent Runner, global Run limit, foreground input queue
 
 **SubAgent Completion Continuation**:
-Worker work continued in the owning Conversation Session in response to a SubAgent's successful or failed completion. The Router receives the Worker report, not the SubAgent result; cancellation or replacement of the originating task withdraws its automatic continuations.
+Worker work continued in the owning Conversation Session in response to a SubAgent's successful or failed completion. The notification identifies the terminal SubAgent but does not include its result; the Worker reads that result through `wait_agent` before reporting to the Router. Cancellation or replacement of the originating task withdraws its automatic continuations.
 _Avoid_: SubAgent restart, new user request, Schedule occurrence
 
 **ReAct Cycle**:
@@ -387,3 +387,7 @@ _Avoid_: Model Route, model string, gateway
 **User Configuration**:
 The single account-global persisted set of runtime, model, memory, and Default Conversation Workspace preferences. Changes govern subsequent Agent Runs while each active Run retains its configuration.
 _Avoid_: Agent profile, Session override, per-chat settings, identity prompt, repair mode
+
+**Runtime Execution Mode**:
+The User Configuration setting `runtime.execution_mode` that selects Router/Worker or the legacy Agent entry for new Foreground Tasks and Schedule occurrences. Existing Tasks and occurrences retain their persisted execution role when this setting changes.
+_Avoid_: Session role override, retroactive Task migration, permission level

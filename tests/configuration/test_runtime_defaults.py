@@ -18,6 +18,7 @@ enable_tool_micro_compression = false
 compact_ratio = 0.9
 permission_level = "workspace-write"
 exec_shell = "auto"
+execution_mode = "router_worker"
 
 [memory]
 batch_size = 10
@@ -111,6 +112,16 @@ DEFAULTABLE_FIELDS = (
         "pwsh",
         "'auto'",
         "bash",
+    ),
+    (
+        "runtime.execution_mode",
+        'execution_mode = "router_worker"',
+        'execution_mode = "agent"',
+        'execution_mode = "manual"',
+        "router_worker",
+        "agent",
+        "'router_worker'",
+        "manual",
     ),
     (
         "memory.batch_size",

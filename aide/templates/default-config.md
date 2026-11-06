@@ -6,6 +6,7 @@ enable_tool_micro_compression = false
 compact_ratio = 0.9
 permission_level = "workspace-write"
 exec_shell = "auto"
+execution_mode = "router_worker"
 
 [memory]
 batch_size = 10

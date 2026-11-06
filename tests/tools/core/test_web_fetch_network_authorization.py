@@ -718,7 +718,7 @@ async def test_web_fetch_popup_uses_the_original_normalized_invocation() -> None
     assert requests[0].details == {
         "url": "http://127.0.0.1:80/admin",
         "format": "text",
-        "maxChars": 50000,
+        "maxChars": 65535,
     }
     assert resolver.calls == []
 

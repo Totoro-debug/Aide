@@ -103,6 +103,7 @@ def test_web_snapshot_exposes_all_safe_fields_without_secrets(tmp_path: Path) ->
         "compact_ratio": 0.9,
         "permission_level": "workspace-write",
         "exec_shell": "auto",
+        "execution_mode": "router_worker",
     }
     assert snapshot.fields["memory"] == {"batch_size": 10, "schedule": "0 * * * *"}
     models = snapshot.fields["models"]

@@ -1,13 +1,18 @@
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 
-export default async function setup({ shutdownTimeoutMs = 15000, sessionModels = false } = {}) {
+export default async function setup({
+  shutdownTimeoutMs = 15000,
+  sessionModels = false,
+  executionMode = "router_worker",
+} = {}) {
   const child = spawn("python", ["-u", "-m", "aide.client.web.frontend.scripts.e2e_service"], {
     cwd: resolve(process.cwd(), "../../../.."),
     stdio: ["pipe", "pipe", "pipe"],
     env: {
       ...process.env,
       AIDE_E2E_SHUTDOWN_TIMEOUT_MS: String(shutdownTimeoutMs),
+      AIDE_E2E_EXECUTION_MODE: executionMode,
       ...(sessionModels ? { AIDE_E2E_SESSION_MODELS: "1" } : {}),
     },
   });

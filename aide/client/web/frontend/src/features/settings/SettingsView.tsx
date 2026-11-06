@@ -796,6 +796,7 @@ export function SettingsView({
       "runtime.compact_ratio": t("settings.compactRatio"),
       "runtime.permission_level": t("settings.permissionLevel"),
       "runtime.exec_shell": t("settings.execShell"),
+      "runtime.execution_mode": t("settings.executionMode"),
       "memory.batch_size": t("settings.batchSize"),
       "memory.schedule": t("settings.schedule"),
     };
@@ -1208,6 +1209,19 @@ export function SettingsView({
                 onChange={(value) => updateField("runtime.compact_ratio", value)}
                 onBlur={() => blurField("runtime.compact_ratio", draft.runtime.compact_ratio)}
               />
+              <label className={styles.settingsField} htmlFor={fieldId("runtime.execution_mode")}>
+                <span className={styles.fieldLabel}>{t("settings.executionMode")}</span>
+                <select
+                  className={styles.selectInput}
+                  id={fieldId("runtime.execution_mode")}
+                  value={draft.runtime.execution_mode}
+                  disabled={controlDisabled}
+                  onChange={(event) => updateField("runtime.execution_mode", event.currentTarget.value)}
+                >
+                  <option value="router_worker">{t("settings.executionModes.router_worker")}</option>
+                  <option value="agent">{t("settings.executionModes.agent")}</option>
+                </select>
+              </label>
               <label className={styles.settingsField} htmlFor={fieldId("runtime.permission_level")}>
                 <span className={styles.fieldLabel}>{t("settings.permissionLevel")}</span>
                 <select

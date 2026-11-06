@@ -22,22 +22,28 @@ class AgentRunSuspension:
     generation: int
     execution_id: str
     question_id: str | None
-    tool_call_id: str
+    tool_call_id: str | None
 
     def __post_init__(self) -> None:
         if self.kind not in {"human_question", "subagent_attention", "worker_reports"}:
             raise ValueError("Agent Run suspension kind is invalid")
         if any(
             not isinstance(value, str) or not value
-            for value in (self.task_id, self.execution_id, self.tool_call_id)
+            for value in (self.task_id, self.execution_id)
         ):
             raise ValueError("Agent Run suspension identities must be non-empty strings")
+        if self.tool_call_id is not None and (
+            not isinstance(self.tool_call_id, str) or not self.tool_call_id
+        ):
+            raise ValueError("Agent Run suspension tool call identity is invalid")
         if self.question_id is not None and (
             not isinstance(self.question_id, str) or not self.question_id
         ):
             raise ValueError("Agent Run suspension question identity is invalid")
         if self.kind != "worker_reports" and self.question_id is None:
             raise ValueError("Question suspension requires a question identity")
+        if self.kind != "worker_reports" and self.tool_call_id is None:
+            raise ValueError("Question suspension requires a tool call identity")
         if (
             isinstance(self.generation, bool)
             or not isinstance(self.generation, int)

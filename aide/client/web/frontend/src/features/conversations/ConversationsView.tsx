@@ -2542,6 +2542,14 @@ function ProjectSessionsContent({
                                     <code title={worker.task_id}>{worker.task_id}</code>
                                     <span>g{worker.generation}</span>
                                     {t(`conversation.workerStates.${worker.state}`)}
+                                    {worker.recovery_error ? (
+                                      <span title={worker.recovery_error.message}>
+                                        {t("conversation.workerRecoveryError", {
+                                          message: worker.recovery_error.message,
+                                          attempts: worker.recovery_error.attempts,
+                                        })}
+                                      </span>
+                                    ) : null}
                                   </span>
                                 ))}
                               </div>

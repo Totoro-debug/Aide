@@ -1320,6 +1320,12 @@ class TerminalConversationApp(App[None]):
                     task_lines.extend(
                         f"  Worker {worker['worker_id']} · {worker['task_id']} · "
                         f"generation {worker['generation']} · {worker['state']}"
+                        + (
+                            f" · recovery error: {worker['recovery_error'].get('message')}"
+                            if isinstance(worker.get("recovery_error"), dict)
+                            and isinstance(worker["recovery_error"].get("message"), str)
+                            else ""
+                        )
                         for worker in workers
                         if isinstance(worker, dict)
                         and all(
@@ -1568,6 +1574,12 @@ class TerminalConversationApp(App[None]):
                     task_lines.extend(
                         f"  Worker {worker['worker_id']} · {worker['task_id']} · "
                         f"generation {worker['generation']} · {worker['state']}"
+                        + (
+                            f" · recovery error: {worker['recovery_error'].get('message')}"
+                            if isinstance(worker.get("recovery_error"), dict)
+                            and isinstance(worker["recovery_error"].get("message"), str)
+                            else ""
+                        )
                         for worker in workers
                         if isinstance(worker, dict)
                         and all(

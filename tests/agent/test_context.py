@@ -878,6 +878,17 @@ async def test_context_builder_reads_live_memory_and_lane_specific_skills(
     )
     second_foreground = builder.foreground_system_prompt()
     second_schedule = builder.schedule_system_prompt()
+    foreground_worker = builder.worker_system_prompt(
+        permission_level="workspace-write",
+        exec_shell="powershell",
+        runtime_facts={"origin": "foreground"},
+    )
+    schedule_worker = builder.worker_system_prompt(
+        permission_level="workspace-write",
+        exec_shell="powershell",
+        runtime_facts={"origin": "schedule"},
+        schedule_worker=True,
+    )
 
     assert "Latest memory." in second_foreground
     assert "Latest memory." in second_schedule
@@ -893,6 +904,19 @@ async def test_context_builder_reads_live_memory_and_lane_specific_skills(
     assert "<skill_catalog>" not in second_foreground
     assert "<skill_always_load>" not in second_foreground
     assert "```jsonl" in second_foreground
+    assert str(workspace) in foreground_worker
+    assert str(agent_home) in foreground_worker
+    assert "Latest memory." in foreground_worker
+    assert "Private planner instructions." in foreground_worker
+    assert '"name":"planner"' in foreground_worker
+    assert "permission_level=workspace-write" in foreground_worker
+    assert '"origin":"foreground"' in foreground_worker
+    assert "## Tool 使用指南" not in foreground_worker
+    assert "Private planner instructions." not in schedule_worker
+    assert "Latest memory." in schedule_worker
+    assert '"origin":"schedule"' in schedule_worker
+    assert "Schedule Run Boundary" not in schedule_worker
+    assert "## Tool 使用指南" not in schedule_worker
 
 
 def test_context_builder_schedule_request_excludes_foreground_skill_and_task_state(

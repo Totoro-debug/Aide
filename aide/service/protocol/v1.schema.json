@@ -26,7 +26,8 @@
         "enable_tool_micro_compression": {"type": "boolean"},
         "compact_ratio": {"type": "number", "minimum": 0.5, "maximum": 0.95},
         "permission_level": {"$ref": "#/$defs/tool_permission_level"},
-        "exec_shell": {"enum": ["auto", "powershell", "pwsh"]}
+        "exec_shell": {"enum": ["auto", "powershell", "pwsh"]},
+        "execution_mode": {"enum": ["router_worker", "agent"]}
       }
     },
     "config_memory_fields": {
@@ -451,7 +452,7 @@
       "properties": {
         "runtime": {
           "$ref": "#/$defs/config_runtime_fields",
-          "required": ["max_tool_result_chars", "max_iterations", "enable_skill_always_load", "enable_tool_micro_compression", "compact_ratio", "permission_level", "exec_shell"]
+          "required": ["max_tool_result_chars", "max_iterations", "enable_skill_always_load", "enable_tool_micro_compression", "compact_ratio", "permission_level", "exec_shell", "execution_mode"]
         },
         "memory": {"$ref": "#/$defs/config_memory_fields", "required": ["batch_size", "schedule"]},
         "web": {"$ref": "#/$defs/config_web_fields"},
@@ -1539,7 +1540,17 @@
         "worker_id": {"$ref": "#/$defs/identifier"},
         "task_id": {"$ref": "#/$defs/identifier"},
         "generation": {"type": "integer", "minimum": 1},
-        "state": {"enum": ["working", "waiting", "ready", "blocked", "failed", "cancelled"]}
+        "state": {"enum": ["working", "waiting", "ready", "blocked", "failed", "cancelled"]},
+        "recovery_error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message", "attempts"],
+          "properties": {
+            "code": {"type": "string", "minLength": 1},
+            "message": {"type": "string", "minLength": 1},
+            "attempts": {"type": "integer", "minimum": 1, "maximum": 4}
+          }
+        }
       }
     },
     "session_claim": {

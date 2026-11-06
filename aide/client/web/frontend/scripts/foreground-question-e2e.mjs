@@ -6,7 +6,7 @@ import setup from "./e2e-setup.mjs";
 import { setInterfaceLanguage } from "./settings-e2e.mjs";
 
 const expect = playwrightExpect.configure({ timeout: 30000 });
-const control = await setup();
+const control = await setup({ executionMode: "agent" });
 let browser;
 try {
   browser = await chromium.launch({ channel: process.env.AIDE_E2E_BROWSER_CHANNEL ?? "msedge" });

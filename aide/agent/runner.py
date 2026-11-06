@@ -54,6 +54,7 @@ type AgentRunnerOutput = (
 type AgentRunnerCheckpointCallback = Callable[
     [Sequence[dict[str, Any]], dict[str, int]], Awaitable[None]
 ]
+type AgentRunnerCompletionCandidateCallback = Callable[[str], AgentRunSuspension | None]
 
 _MAX_ITERATIONS_MESSAGE = (
     "Aide 本轮对话已经达到最大循环次数，仍没有输出最终结果。"  # noqa: RUF001
@@ -215,6 +216,7 @@ class AgentRunner:
         tool_calls_as_tasks: bool = True,
         on_checkpoint: AgentRunnerCheckpointCallback | None = None,
         on_first_request_prepared: Callable[[], None] | None = None,
+        on_completion_candidate: AgentRunnerCompletionCandidateCallback | None = None,
     ) -> AgentRunnerResult:
         _validate_max_iterations(max_iterations)
         if remaining_iterations is not None:
@@ -428,6 +430,23 @@ class AgentRunner:
                     return finish_cancelled(final_content="")
 
                 if not pending_tool_calls:
+                    suspension = (
+                        None
+                        if on_completion_candidate is None
+                        else on_completion_candidate(response.message.content)
+                    )
+                    if suspension is not None:
+                        if increment and increment[-1] == assistant_message:
+                            increment.pop()
+                            runtime_messages.pop()
+                        await checkpoint()
+                        return AgentRunnerResult(
+                            messages=increment,
+                            final_content="",
+                            usage=usage,
+                            finish_reason="suspended",
+                            suspension=suspension,
+                        )
                     await checkpoint()
                     return AgentRunnerResult(
                         messages=increment,
@@ -672,6 +691,21 @@ class AgentRunner:
                                 result=deferred.content,
                             ))
                         pending_tool_calls.clear()
+                        suspension = (
+                            None
+                            if on_completion_candidate is None
+                            else on_completion_candidate(final_response)
+                        )
+                        if suspension is not None:
+                            await checkpoint()
+                            await close_segment()
+                            return AgentRunnerResult(
+                                messages=increment,
+                                final_content="",
+                                usage=usage,
+                                finish_reason="suspended",
+                                suspension=suspension,
+                            )
                         _append_run_message(runtime_messages, increment, {
                             "role": "assistant",
                             "content": final_response,
@@ -876,8 +910,8 @@ class AgentRunner:
 
 
 def _validate_max_iterations(value: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 50:
-        raise ValueError("max_iterations must be an integer at least 50")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("max_iterations must be a positive integer")
 
 
 def _never_cancel() -> bool:

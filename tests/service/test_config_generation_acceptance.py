@@ -84,6 +84,12 @@ class _GenerationProvider(_RemovalProvider):
             str(messages[last_user_index].get("content", ""))
             if last_user_index >= 0 else ""
         )
+        try:
+            router_capsule = json.loads(latest_user)
+        except json.JSONDecodeError:
+            router_capsule = None
+        if isinstance(router_capsule, dict) and isinstance(router_capsule.get("input"), str):
+            latest_user = router_capsule["input"]
         tool_results = [
             item for item in messages[last_user_index + 1 :]
             if item.get("role") == "tool"

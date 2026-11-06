@@ -25,6 +25,7 @@ export interface SettingsForm {
     compact_ratio: string;
     permission_level: ToolPermissionLevel;
     exec_shell: "auto" | "powershell" | "pwsh";
+    execution_mode: "router_worker" | "agent";
   };
   memory: {
     batch_size: string;
@@ -138,6 +139,7 @@ export function formFromConfig(
       compact_ratio: String(fields.runtime.compact_ratio),
       permission_level: fields.runtime.permission_level,
       exec_shell: fields.runtime.exec_shell,
+      execution_mode: fields.runtime.execution_mode ?? "router_worker",
     },
     memory: {
       batch_size: String(fields.memory.batch_size),
@@ -294,6 +296,7 @@ export function configFromForm(form: SettingsForm): { fields: ConfigPatchFields;
       compact_ratio: Number(form.runtime.compact_ratio),
       permission_level: form.runtime.permission_level,
       exec_shell: form.runtime.exec_shell,
+      execution_mode: form.runtime.execution_mode,
     },
     memory: {
       batch_size: Number(form.memory.batch_size),

@@ -66,6 +66,7 @@ def _config(
     mcp_cwd: str,
 ) -> str:
     large_context_window = 65536 if os.environ.get("AIDE_E2E_SESSION_MODELS") == "1" else 8192
+    execution_mode = os.environ.get("AIDE_E2E_EXECUTION_MODE", "router_worker")
     return f"""[models.providers.primary]
 protocol = "openai-compatible"
 base_url = "{base_url}"
@@ -98,6 +99,7 @@ timeout = 120
 [runtime]
 compact_ratio = 0.9
 permission_level = "full-access"
+execution_mode = "{execution_mode}"
 
 [models.routes.chat]
 provider_id = "primary"

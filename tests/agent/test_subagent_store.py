@@ -255,7 +255,19 @@ def test_restore_discards_child_answer_and_restores_waiting_checkpoint_and_artif
 ) -> None:
     state, session_id = _workspace(tmp_path)
     store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
-    queued = _register(store, "Restore child question")
+    question_snapshot = replace(
+        _snapshot(), tool_names=("read_file", "list_dir", "ask_user")
+    )
+    queued = store.register(
+        title="Restore child question",
+        task="Task material for Restore child question.",
+        parent_run_id=_RUN_ID,
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token=_RESTORE_TOKEN,
+        ),
+        creator_snapshot=question_snapshot,
+    )
     question_id = "question-restore"
     original_artifact = f".aide/artifacts/{session_id}/{queued.agent_id}_before.txt"
     answer_artifact = f".aide/artifacts/{session_id}/{queued.agent_id}_after.txt"
@@ -360,7 +372,19 @@ def test_restore_discards_child_answer_and_restores_waiting_checkpoint_and_artif
 def test_subagent_restore_prefix_rejects_unknown_fields(tmp_path: Path) -> None:
     state, session_id = _workspace(tmp_path)
     store = SubAgentRecordStore(state, session_id, now=lambda: _NOW)
-    queued = _register(store, "Unknown Restore prefix field")
+    question_snapshot = replace(
+        _snapshot(), tool_names=("read_file", "list_dir", "ask_user")
+    )
+    queued = store.register(
+        title="Unknown Restore prefix field",
+        task="Task material for Unknown Restore prefix field.",
+        parent_run_id=_RUN_ID,
+        source=SubAgentSource(
+            kind=SubAgentSourceKind.FOREGROUND,
+            restore_run_token=_RESTORE_TOKEN,
+        ),
+        creator_snapshot=question_snapshot,
+    )
     running = replace(
         queued,
         status=SubAgentStatus.RUNNING,

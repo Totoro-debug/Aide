@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from itertools import pairwise
@@ -80,6 +80,62 @@ from tests.service.test_service_transport import _persist_session, _prepare_agen
 _NOW = datetime(2026, 10, 8, 9, 0, tzinfo=UTC)
 _RUN_ID = "123e4567-e89b-42d3-a456-426614174000"
 _RESTORE_TOKEN = "123e4567-e89b-42d3-a456-426614174001"
+_WORKSPACE_INPUT = WorkspaceRecord.input
+
+
+async def _legacy_agent_input(
+    workspace: WorkspaceRecord,
+    client_id: str,
+    session_id: str,
+    version: int,
+    text: str,
+    run_id: str,
+    request_id: str | None = None,
+    *,
+    foreground_question_id: str | None = None,
+    foreground_task_id: str | None = None,
+    foreground_task_continue: bool = False,
+    foreground_task_generation: int | None = None,
+    foreground_delivery: Mapping[str, object] | None = None,
+) -> Any:
+    if (
+        foreground_task_id is None
+        and foreground_question_id is None
+        and foreground_delivery is None
+        and not foreground_task_continue
+    ):
+        store = workspace.foreground_work_store(session_id)
+        snapshot = store.load()
+        latest = snapshot.tasks[-1] if snapshot.tasks else None
+        if latest is None or latest.state not in {
+            "running",
+            "waiting_for_answer",
+            "waiting_for_workers",
+        }:
+            latest = store.begin_task(
+                str(uuid4()),
+                f"legacy-seed:{uuid4()}",
+                generation=1,
+                permission_level=workspace.service.client_permission(client_id).current(),
+                execution_role="agent",
+            ).tasks[-1]
+            foreground_task_id = latest.task_id
+            foreground_task_generation = latest.generation
+            foreground_task_continue = True
+    return await _WORKSPACE_INPUT(
+        workspace,
+        client_id,
+        session_id,
+        version,
+        text,
+        run_id,
+        request_id,
+        foreground_question_id=foreground_question_id,
+        foreground_task_id=foreground_task_id,
+        foreground_task_continue=foreground_task_continue,
+        foreground_task_generation=foreground_task_generation,
+        foreground_delivery=foreground_delivery,
+    )
 
 
 def _add_model_routes(home: AgentHome, *names: str) -> None:
@@ -280,6 +336,72 @@ class _DelegatingProvider:
         self.keep_task = False
         self.explicit_result_continuation_started = asyncio.Event()
         self.explicit_result_continuation_context = ""
+        self.router_tool_names: list[set[str]] = []
+        self.router_dispatch_count = 0
+        self.router_report_continuation_count = 0
+        self.router_report_texts: list[str] = []
+        self.router_report_started = asyncio.Event()
+        self.worker_tool_names: list[set[str]] = []
+
+    def _router_worker_response(
+        self,
+        messages: ModelMessages,
+        tool_names: set[str],
+    ) -> AsyncIterator[ModelStreamEvent] | None:
+        system = messages[0].get("content", "") if messages else ""
+        if isinstance(system, str) and system.startswith("You are an Aide Worker."):
+            self.worker_tool_names.append(set(tool_names))
+        if "dispatch_worker" not in tool_names:
+            return None
+
+        self.router_tool_names.append(set(tool_names))
+        latest_user_index = max(
+            (index for index, message in enumerate(messages) if message.get("role") == "user"),
+            default=-1,
+        )
+        latest_user = (
+            str(messages[latest_user_index].get("content", ""))
+            if latest_user_index >= 0 else ""
+        )
+        current_tool_results = messages[latest_user_index + 1:]
+        is_report = "Worker reports for automatic continuation:" in latest_user
+        dispatch_completed = any(
+            message.get("role") == "tool" and message.get("name") == "dispatch_worker"
+            for message in current_tool_results
+        )
+        if is_report:
+            self.router_report_continuation_count += 1
+            self.router_report_texts.append(latest_user)
+            self.router_report_started.set()
+        if is_report or dispatch_completed:
+            response = (
+                "The Worker task is complete."
+                if is_report
+                else "The Worker is working on the assigned task."
+            )
+            return self._events(
+                "",
+                tool_call=ModelToolCall(
+                    "router-finish",
+                    "finish",
+                    json.dumps({"response": response}),
+                ),
+            )
+
+        task = latest_user.rsplit("## User Input\n", 1)[-1].strip() or latest_user.strip()
+        self.router_dispatch_count += 1
+        return self._events(
+            "",
+            tool_call=ModelToolCall(
+                f"router-dispatch-{self.router_dispatch_count}",
+                "dispatch_worker",
+                json.dumps({
+                    "task_id": f"fixture-worker-{self.router_dispatch_count}",
+                    "task": task,
+                    "context": [],
+                }),
+            ),
+        )
 
     @staticmethod
     def _response(content: str, *, tool_call: ModelToolCall | None = None) -> ModelResponse:
@@ -318,9 +440,17 @@ class _DelegatingProvider:
             if isinstance(tool.get("function"), dict)
             and isinstance((name := tool["function"].get("name")), str)
         }
+        router_response = self._router_worker_response(messages, tool_names)
+        if router_response is not None:
+            return router_response
         latest_user_index = max(
             (index for index, message in enumerate(messages) if message.get("role") == "user"),
             default=-1,
+        )
+        latest_user_text = (
+            str(messages[latest_user_index].get("content", ""))
+            if latest_user_index >= 0
+            else ""
         )
         user_text = "\n".join(str(message.get("content", "")) for message in messages)
         self.requests.append((user_text, tool_names))
@@ -330,7 +460,7 @@ class _DelegatingProvider:
             if message.get("role") == "tool"
         ]
 
-        if "SubAgent result for automatic continuation:" in user_text:
+        if "SubAgent result for automatic continuation:" in latest_user_text:
             self.automatic_continuation_count += 1
             self.automatic_continuation_started.set()
             if self.automatic_write and not any(m.get("tool_call_id") == "auto-write" for m in current_tool_results):
@@ -341,19 +471,19 @@ class _DelegatingProvider:
                     "auto-write", "write_file", '{"path":"auto-output.txt","content":"automatic bytes"}'))
             return self._events("Main automatically handled the delegated result.")
 
-        if "## Result from delegated work" in user_text:
-            self.explicit_result_continuation_context = user_text
+        if "## Result from delegated work" in latest_user_text:
+            self.explicit_result_continuation_context = latest_user_text
             self.explicit_result_continuation_started.set()
             return self._events("Main used the recovered delegated result.")
 
-        if "Continuation recovery seed" in user_text:
+        if "Continuation recovery seed" in latest_user_text:
             return self._events("The foreground Task is ready to continue.")
 
-        if "Direct schedule integration request" in user_text:
+        if "Direct schedule integration request" in latest_user_text:
             self.direct_schedule_tool_names.append(tool_names)
             return self._events("Direct schedule completed.")
 
-        if "SubAgent question delegation request" in user_text:
+        if "SubAgent question delegation request" in latest_user_text:
             self.question_parent_started.set()
             self.parent_tool_names.append(tool_names)
             spawn_results = {
@@ -457,12 +587,51 @@ class _DelegatingProvider:
             )
 
         if (
-            "initial delegation request" in user_text
-            and "follow-up result request" not in user_text
+            "initial delegation request" in latest_user_text
+            and "follow-up result request" not in latest_user_text
         ):
             self.parent_tool_names.append(tool_names)
+            wait_result = next(
+                (item for item in current_tool_results if item.get("tool_call_id") == "wait-child"),
+                None,
+            )
+            if wait_result is not None:
+                self.wait_result_contents = [str(wait_result.get("content", ""))]
+                if "SubAgent child answer" in self.wait_result_contents[0]:
+                    self.old_result_seen.set()
+                return self._events("Worker incorporated its SubAgent result.")
             if self.spawn_requested:
-                return self._events("Main run completed.")
+                system_prompt = messages[0].get("content", "") if messages else ""
+                if not (
+                    isinstance(system_prompt, str)
+                    and system_prompt.startswith("You are an Aide Worker.")
+                ):
+                    return self._events("Main run completed.")
+                if "wait_agent" not in tool_names:
+                    return self._events(
+                        "",
+                        tool_call=ModelToolCall(
+                            "search-wait",
+                            "tool_search",
+                            '{"query":"wait agent"}',
+                        ),
+                    )
+                spawn_result = next(
+                    item for item in current_tool_results
+                    if item.get("tool_call_id") == "spawn-child"
+                )
+                self.agent_id = cast(
+                    str, json.loads(str(spawn_result.get("content", "{}")))["agent_id"]
+                )
+                self.wait_requested = True
+                return self._events(
+                    "",
+                    tool_call=ModelToolCall(
+                        "wait-child",
+                        "wait_agent",
+                        json.dumps({"agent_ids": [self.agent_id]}),
+                    ),
+                )
             if "spawn_agent" not in tool_names:
                 return self._events(
                     "",
@@ -482,7 +651,7 @@ class _DelegatingProvider:
                 ),
             )
 
-        if "follow-up result request" in user_text:
+        if "follow-up result request" in latest_user_text:
             self.parent_tool_names.append(tool_names)
             if self.wait_requested:
                 self.wait_result_contents = [
@@ -593,6 +762,12 @@ class _DelegatingProvider:
             if isinstance(tool.get("function"), dict)
             and isinstance((name := tool["function"].get("name")), str)
         }
+        router_response = self._router_worker_response(messages, tool_names)
+        if router_response is not None:
+            async for event in router_response:
+                if isinstance(event, ModelCompleted):
+                    return event.response
+            return self._response("The Router produced no decision.")
         user_text = "\n".join(str(message.get("content", "")) for message in messages)
         if "Direct schedule integration request" in user_text:
             self.direct_schedule_tool_names.append(tool_names)
@@ -661,6 +836,9 @@ class _FirstDraftProvider(_DelegatingProvider):
         del model, max_output, temperature, reasoning_effort, timeout, continuation
         user_text = "\n".join(str(message.get("content", "")) for message in messages)
         tool_names = {tool["function"]["name"] for tool in tools}
+        router_response = self._router_worker_response(messages, tool_names)
+        if router_response is not None:
+            return router_response
         if "first draft delegation request" in user_text:
             if "spawn_agent" not in tool_names:
                 return self._events(
@@ -746,6 +924,11 @@ class _BatchDelegatingProvider(_DelegatingProvider):
         self.batch_parent_waiting = asyncio.Event()
         self.release_batch_parent = asyncio.Event()
         self.batch_auto_requests: list[str] = []
+        self.batch_child_results: dict[int, str] = {}
+        self.include_batch_report = False
+        self.batch_child_completed = {
+            index: asyncio.Event() for index in range(1, 4)
+        }
         self.hold_batch_children: set[int] = set()
         self.batch_child_waiting = {index: asyncio.Event() for index in range(1, 4)}
         self.release_batch_children = {index: asyncio.Event() for index in range(1, 4)}
@@ -770,6 +953,14 @@ class _BatchDelegatingProvider(_DelegatingProvider):
             for message in messages
             if message.get("role") in {"user", "tool"}
         )
+        latest_user_text = next(
+            (
+                str(message.get("content", ""))
+                for message in reversed(messages)
+                if message.get("role") == "user"
+            ),
+            "",
+        )
         child_prompt = next(
             (
                 str(message.get("content", ""))
@@ -787,7 +978,10 @@ class _BatchDelegatingProvider(_DelegatingProvider):
                 self.batch_child_waiting[index].set()
                 if index in self.hold_batch_children:
                     await self.release_batch_children[index].wait()
-                yield ModelCompleted(self._response(f"Batch child result {result_number}."))
+                result = f"Batch child result {result_number}."
+                self.batch_child_results[index] = result
+                self.batch_child_completed[index].set()
+                yield ModelCompleted(self._response(result))
 
             return finish_child()
 
@@ -797,7 +991,10 @@ class _BatchDelegatingProvider(_DelegatingProvider):
             if isinstance(tool.get("function"), dict)
             and isinstance((name := tool["function"].get("name")), str)
         }
-        if "batch delegation request" in user_text:
+        router_response = self._router_worker_response(messages, tool_names)
+        if router_response is not None:
+            return router_response
+        if "batch delegation request" in latest_user_text:
             completed = {
                 item.get("tool_call_id")
                 for item in messages
@@ -837,11 +1034,21 @@ class _BatchDelegatingProvider(_DelegatingProvider):
                 async def finish_parent() -> AsyncIterator[ModelStreamEvent]:
                     self.batch_parent_waiting.set()
                     await self.release_batch_parent.wait()
-                    yield ModelCompleted(self._response("Main run completed."))
+                    if self.include_batch_report:
+                        await asyncio.gather(
+                            *(event.wait() for event in self.batch_child_completed.values())
+                        )
+                        report = "\n".join(
+                            self.batch_child_results[index]
+                            for index in sorted(self.batch_child_results)
+                        )
+                    else:
+                        report = "Main run completed."
+                    yield ModelCompleted(self._response(report))
 
                 return finish_parent()
 
-        if "## Runtime Event: SubAgent Result" in user_text:
+        if "## Runtime Event: SubAgent Result" in latest_user_text:
             self.batch_auto_requests.append(user_text)
             response = super().stream(
                 messages=messages,
@@ -861,6 +1068,13 @@ class _BatchDelegatingProvider(_DelegatingProvider):
 
                 return finish_automatic()
             return response
+        if (
+            self.spawn_requested
+            and "initial delegation request" not in latest_user_text
+            and "batch delegation request" not in latest_user_text
+            and latest_user_text
+        ):
+            return self._events("Main handled the supplemental request.")
         return super().stream(
             messages=messages,
             tools=tools,
@@ -877,6 +1091,9 @@ async def management_case(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[AgentService, WorkspaceRecord, str, str, str]]:
+    # These tests cover pre-Router Foreground Tasks; Router-specific cases use
+    # router_management_case below.
+    monkeypatch.setattr(WorkspaceRecord, "input", _legacy_agent_input)
     home = _prepare_agent_home(tmp_path / "agent-home")
     _add_model_routes(home, "schedule", "subagent")
     workspace_path = tmp_path / "workspace"
@@ -907,6 +1124,15 @@ async def management_case(
         yield service, workspace, client.client_id, session_id, other_session_id
     finally:
         await service.stop()
+
+
+@pytest_asyncio.fixture
+async def router_management_case(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[AgentService, WorkspaceRecord, str, str, str]:
+    monkeypatch.setattr(WorkspaceRecord, "input", _WORKSPACE_INPUT)
+    return management_case
 
 
 @pytest.mark.asyncio
@@ -1204,10 +1430,10 @@ async def test_historical_subagent_session_read_failure_still_reports_persistenc
 
 
 @pytest.mark.asyncio
-async def test_foreground_main_run_delegates_and_later_reads_the_completed_result(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+async def test_foreground_worker_delegates_and_consumes_its_completed_result(
+    router_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = router_management_case
     provider = _DelegatingProvider()
     assert service._model_router is not None
     assert workspace.resources.router is service._model_router
@@ -1231,10 +1457,15 @@ async def test_foreground_main_run_delegates_and_later_reads_the_completed_resul
             _RUN_ID,
         )
         await asyncio.wait_for(provider.child_started.wait(), timeout=5)
-        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
 
         assert any("spawn_agent" in names for names in provider.parent_tool_names)
         assert "tool_search" in provider.parent_tool_names[0]
+        assert any("wait_agent" in names for names in provider.parent_tool_names)
+        assert provider.router_tool_names
+        assert all(
+            names == {"ask_user", "dispatch_worker", "finish"}
+            for names in provider.router_tool_names
+        )
         assert "spawn_agent" not in provider.child_tool_names
         assert "wait_agent" not in provider.child_tool_names
         assert "schedule" not in provider.child_tool_names
@@ -1258,6 +1489,11 @@ async def test_foreground_main_run_delegates_and_later_reads_the_completed_resul
             timeout=4,
         )
         assert results[0].result == "SubAgent child answer."
+        await asyncio.wait_for(provider.old_result_seen.wait(), timeout=5)
+        await asyncio.wait_for(provider.router_report_started.wait(), timeout=5)
+        await asyncio.wait_for(sink.wait_for("run.completed", _RUN_ID), timeout=5)
+        assert provider.router_report_continuation_count == 1
+        assert "SubAgent child answer" not in provider.router_report_texts[0]
         terminal = workspace.subagent_repository(session_id).get(agent_id)
         assert terminal is not None
         child_events = [
@@ -1272,17 +1508,6 @@ async def test_foreground_main_run_delegates_and_later_reads_the_completed_resul
             for event in child_events
         )
 
-        provider.agent_id = agent_id
-        follow_up_run_id = str(uuid4())
-        await workspace.input(
-            client_id,
-            session_id,
-            claim_version,
-            "Please make a follow-up result request.",
-            follow_up_run_id,
-        )
-        await asyncio.wait_for(sink.wait_for("run.completed", follow_up_run_id), timeout=5)
-        assert provider.old_result_seen.is_set(), provider.wait_result_contents
     finally:
         provider.release_child.set()
 
@@ -2011,11 +2236,11 @@ async def test_unanswered_task_results_stay_gated_while_independent_task_continu
 @pytest.mark.asyncio
 @pytest.mark.parametrize("successor_kind", ["cli", "web"])
 async def test_foreground_result_continues_after_session_claim_is_released(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    router_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     successor_kind: Literal["cli", "web"],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = router_management_case
     provider = _DelegatingProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -2046,7 +2271,8 @@ async def test_foreground_result_continues_after_session_claim_is_released(
     successor = await service.register_client(successor_kind)
     await service.connect_client(successor.client_id, _CollectingSink())
     provider.release_child.set()
-    await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=12)
+    await asyncio.wait_for(provider.old_result_seen.wait(), timeout=12)
+    await asyncio.wait_for(provider.router_report_started.wait(), timeout=12)
 
     async with asyncio.timeout(12):
         while True:
@@ -2054,7 +2280,7 @@ async def test_foreground_result_continues_after_session_claim_is_released(
             snapshot = workspace.session_snapshot(session_id)
             messages = cast(list[dict[str, object]], snapshot["messages"])
             if any(
-                message.get("content") == "Main automatically handled the delegated result."
+                message.get("content") == "The Worker task is complete."
                 for message in messages
             ):
                 break
@@ -2074,8 +2300,10 @@ async def test_foreground_result_continues_after_session_claim_is_released(
             )
         assert stale_claim.value.code == "stale_claim"
 
+    assert provider.router_report_continuation_count == 1
     assert sum(
-        message.get("content") == "Main automatically handled the delegated result."
+        message.get("role") == "assistant"
+        and message.get("content") == "The Worker task is complete."
         for message in messages
     ) == 1
     await asyncio.wait_for(automatic_completed.wait(), timeout=5)
@@ -2085,17 +2313,18 @@ async def test_foreground_result_continues_after_session_claim_is_released(
     assert cast(dict[str, object], claimed_snapshot["live_state"])["runs"] == []
     claimed_messages = cast(list[dict[str, object]], claimed_snapshot["messages"])
     assert sum(
-        message.get("content") == "Main automatically handled the delegated result."
+        message.get("role") == "assistant"
+        and message.get("content") == "The Worker task is complete."
         for message in claimed_messages
     ) == 1
 
 
 @pytest.mark.asyncio
 async def test_expired_client_does_not_destroy_foreground_work_while_service_is_online(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    router_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = router_management_case
     provider = _DelegatingProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -2139,21 +2368,25 @@ async def test_expired_client_does_not_destroy_foreground_work_while_service_is_
     )
     assert subagents[0]["status"] == "running"
     provider.release_child.set()
-    await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=12)
+    await asyncio.wait_for(provider.old_result_seen.wait(), timeout=12)
+    await asyncio.wait_for(provider.router_report_started.wait(), timeout=12)
     async with asyncio.timeout(12):
         while True:
             successor_sink.changed.clear()
             snapshot = workspace.session_snapshot(session_id)
             messages = cast(list[dict[str, object]], snapshot["messages"])
             if any(
-                message.get("content") == "Main automatically handled the delegated result."
+                message.get("role") == "assistant"
+                and message.get("content") == "The Worker task is complete."
                 for message in messages
             ):
                 break
             await asyncio.sleep(0.01)
 
+    assert provider.router_report_continuation_count == 1
     assert sum(
-        message.get("content") == "Main automatically handled the delegated result."
+        message.get("role") == "assistant"
+        and message.get("content") == "The Worker task is complete."
         for message in messages
     ) == 1
     claimed = await service.claim(successor.client_id, workspace.workspace_id, session_id)
@@ -2161,17 +2394,18 @@ async def test_expired_client_does_not_destroy_foreground_work_while_service_is_
     claimed_snapshot = cast(dict[str, object], claimed["snapshot"])
     claimed_messages = cast(list[dict[str, object]], claimed_snapshot["messages"])
     assert sum(
-        message.get("content") == "Main automatically handled the delegated result."
+        message.get("role") == "assistant"
+        and message.get("content") == "The Worker task is complete."
         for message in claimed_messages
     ) == 1
 
 
 @pytest.mark.asyncio
 async def test_expired_task_child_denies_confirmation_without_workspace_audience(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    router_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service, workspace, client_id, session_id, _ = management_case
+    service, workspace, client_id, session_id, _ = router_management_case
     provider = _DelegatingProvider()
     provider.write_path = "unroutable-child.txt"
     service.model_router._provider_factory = lambda _configuration: provider
@@ -2204,16 +2438,17 @@ async def test_expired_task_child_denies_confirmation_without_workspace_audience
     await asyncio.wait_for(expiry, timeout=5)
     provider.allow_write.set()
     provider.release_child.set()
-    await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=10)
+    await asyncio.wait_for(provider.router_report_started.wait(), timeout=10)
+    assert provider.router_report_continuation_count == 1
     assert not (workspace.workspace_path / "unroutable-child.txt").exists()
     assert not any(event["type"] == "confirmation.requested" for event in outsider_sink.events)
 
 
 @pytest.mark.asyncio
 async def test_offline_foreground_result_waits_until_client_reconnects(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    router_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = router_management_case
     provider = _DelegatingProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -2246,13 +2481,13 @@ async def test_offline_foreground_result_waits_until_client_reconnects(
             if subagents[0]["status"] == "completed":
                 break
             await asyncio.sleep(0.01)
-    assert provider.automatic_continuation_count == 0
+    assert provider.router_report_continuation_count == 0
 
     reconnected = await service.register_client("cli", reconnect_credential)
     reconnected_sink = _CollectingSink()
     await service.connect_client(reconnected.client_id, reconnected_sink)
     assert service.state == "ready"
-    await asyncio.wait_for(provider.automatic_continuation_started.wait(), timeout=12)
+    await asyncio.wait_for(provider.router_report_started.wait(), timeout=12)
     async with asyncio.timeout(12):
         while True:
             messages = cast(
@@ -2260,13 +2495,14 @@ async def test_offline_foreground_result_waits_until_client_reconnects(
                 workspace.session_snapshot(session_id)["messages"],
             )
             if any(
-                message.get("content") == "Main automatically handled the delegated result."
+                message.get("role") == "assistant"
+                and message.get("content") == "The Worker task is complete."
                 for message in messages
             ):
                 break
             await asyncio.sleep(0.01)
 
-    assert provider.automatic_continuation_count == 1
+    assert provider.router_report_continuation_count == 1
 
 
 @pytest.mark.asyncio
@@ -2535,7 +2771,7 @@ async def test_completed_child_automatically_continues_the_current_task_without_
         assert trace[0].origin is TraceOrigin.FOREGROUND
         assert trace[0].owner_session_id == session_id
         assert trace[0].usage.input_tokens == 1 and trace[0].usage.output_tokens == 1
-        assert trace[0].restore_run_token == cast(list[dict[str, object]], after["restore_anchors"])[-1]["run_token"]
+        assert trace[0].restore_run_token == record.source.restore_run_token
         result = service.get_subagent(
             client_id,
             workspace.workspace_id,
@@ -2916,18 +3152,21 @@ async def test_missing_subagent_route_keeps_query_tools_but_fences_completed_run
         completed = _complete(repository, _register(repository, "Existing task"))
         chat_gateway = next(gateway for route, gateway in observed if route == "chat")
         chat_tools = {tool.name for tool in chat_gateway.catalog}
-        assert "spawn_agent" not in chat_tools
-        assert {"wait_agent", "list_agents"} <= chat_tools
-        chat_gateway.expose(("wait_agent", "list_agents"))
-        listed = await chat_gateway.call(ModelToolCall(id="list", name="list_agents", arguments="{}"))
-        waited = await chat_gateway.call(ModelToolCall(
-            id="wait", name="wait_agent",
-            arguments=json.dumps({"agent_ids": [completed.agent_id]}),
-        ))
-        assert listed.status == waited.status == "error"
-        assert listed.content == waited.content == (
-            "The foreground Task execution is no longer active."
+        assert chat_tools == {"ask_user", "dispatch_worker", "finish"}
+        denied = await asyncio.gather(
+            *(
+                chat_gateway.call(ModelToolCall(
+                    id=f"denied-{name}",
+                    name=name,
+                    arguments=(
+                        json.dumps({"agent_ids": [completed.agent_id]})
+                        if name == "wait_agent" else "{}"
+                    ),
+                ))
+                for name in ("spawn_agent", "wait_agent", "list_agents")
+            )
         )
+        assert all(result.status == "error" for result in denied)
 
         job = ScheduleJob(
             job_id=str(uuid4()),
@@ -2944,17 +3183,16 @@ async def test_missing_subagent_route_keeps_query_tools_but_fences_completed_run
         await asyncio.wait_for(workspace.schedule_service._active_runs[job.job_id].task, timeout=5)
         schedule_gateway = next(gateway for route, gateway in observed if route == "schedule")
         schedule_tools = {tool.name for tool in schedule_gateway.catalog}
-        assert "spawn_agent" not in schedule_tools
-        assert {"wait_agent", "list_agents"} <= schedule_tools
+        assert schedule_tools == {"ask_user", "dispatch_worker", "finish"}
     finally:
         await service.stop()
 
 
 @pytest.mark.asyncio
 async def test_schedule_occurrence_delegates_and_direct_schedule_hides_subagent_tools(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    router_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
-    service, workspace, _client_id, _session_id, _other_session_id = management_case
+    service, workspace, _client_id, _session_id, _other_session_id = router_management_case
     provider = _DelegatingProvider()
     assert service._model_router is not None
     service._model_router._provider_factory = lambda _configuration: provider
@@ -2978,27 +3216,23 @@ async def test_schedule_occurrence_delegates_and_direct_schedule_hides_subagent_
                 f"Schedule SubAgent did not start; requests={provider.requests!r}; "
                 f"jobs={await workspace.schedule_service.public_snapshot()!r}"
             )
-        for _ in range(500):
-            if job.job_id not in workspace.schedule_service._active_runs:
-                break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail("Schedule Job did not finish while its SubAgent remained active.")
+        assert job.job_id in workspace.schedule_service._active_runs
 
-        schedule_loop = workspace._schedule_loops[job.job_id].loop
-        assert any(
-            message.get("content") == "Scheduled Main Run completed."
-            for message in schedule_loop.session.messages
-        )
+        occurrence = workspace.schedule_service._active_runs[job.job_id].occurrence
         repository = workspace.subagent_repository(job.session_id)
         items = repository.list().items
         assert len(items) == 1
         record = repository.get(items[0].agent_id)
         assert record is not None
         assert record.status is SubAgentStatus.RUNNING
-        assert record.source.kind is SubAgentSourceKind.SCHEDULE
-        assert record.source.job_id == job.job_id
-        assert record.source.occurrence_id is not None
+        assert record.source.kind is SubAgentSourceKind.WORKER
+        assert record.source.worker_id is not None
+        assert record.source.task_id == str(occurrence.occurrence_id)
+        assert record.source.task_generation == 1
+        worker = workspace.worker_store(job.session_id).get(record.source.worker_id)
+        assert worker is not None
+        assert worker.parent_task_id == record.source.task_id
+        assert worker.parent_generation == record.source.task_generation
         permission_snapshot = workspace._capture_schedule_permission_snapshot()
         assert workspace._exec_host is not None
         assert record.creator_snapshot.permission_level == permission_snapshot.level
@@ -3013,16 +3247,23 @@ async def test_schedule_occurrence_delegates_and_direct_schedule_hides_subagent_
             timeout=4,
         )
         assert result[0].result == "SubAgent child answer."
+        await asyncio.wait_for(provider.router_report_started.wait(), timeout=5)
+        first_occurrence = workspace.schedule_service._active_runs[job.job_id].task
+        await asyncio.wait_for(first_occurrence, timeout=5)
+        assert provider.router_report_continuation_count == 1
 
         provider.spawn_requested = False
         workspace.schedule_service._reserve(
             job, current_monotonic=asyncio.get_running_loop().time()
         )
+        second_occurrence = workspace.schedule_service._active_runs[job.job_id].occurrence
         await asyncio.wait_for(workspace.schedule_service._active_runs[job.job_id].task, timeout=5)
         assert workspace._subagent_coordinator(job.session_id) is coordinator
         records = [repository.get(item.agent_id) for item in repository.list().items]
         assert len(records) == 2
-        assert len({record.source.occurrence_id for record in records if record is not None}) == 2
+        assert {
+            record.source.task_id for record in records if record is not None
+        } == {str(occurrence.occurrence_id), str(second_occurrence.occurrence_id)}
         for scheduled_record in records:
             assert scheduled_record is not None
             await asyncio.wait_for(coordinator.wait([scheduled_record.agent_id]), timeout=4)
@@ -3055,9 +3296,9 @@ async def test_schedule_occurrence_delegates_and_direct_schedule_hides_subagent_
 
 @pytest.mark.asyncio
 async def test_real_child_confirmation_cancel_and_file_restore_after_claim_release(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    router_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
-    service, workspace, client_id, session_id, other_session_id = management_case
+    service, workspace, client_id, session_id, other_session_id = router_management_case
     provider = _DelegatingProvider()
     provider.write_path = "delegated.txt"
     target = workspace.workspace_path / provider.write_path
@@ -4264,12 +4505,12 @@ async def test_workspace_startup_interrupts_persisted_subagent_tasks(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["cancel", "replace", "clear"])
 async def test_task_control_drains_owned_child_and_keeps_history(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    router_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     operation: str,
 ) -> None:
     from tests.service.test_foreground_questions import _wait_for_idle
 
-    service, workspace, client_id, session_id, _ = management_case
+    service, workspace, client_id, session_id, _ = router_management_case
     provider = _DelegatingProvider()
     assert service._model_router is not None
     service._model_router._provider_factory = lambda _configuration: provider
@@ -4357,12 +4598,12 @@ async def test_restored_session_can_delegate_through_resident_pool(
 
 @pytest.mark.asyncio
 async def test_task_fence_blocks_child_tools_before_cleanup_finishes(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    router_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.service.test_foreground_questions import _wait_for_idle
 
-    service, workspace, client_id, sid, _ = management_case
+    service, workspace, client_id, sid, _ = router_management_case
     provider = _DelegatingProvider()
     provider.write_path = "late-child.txt"
     service.client_permission(client_id).select("workspace-write")
@@ -4904,12 +5145,23 @@ async def test_explicit_continue_resumes_original_interrupted_child_after_restar
         if recovery_fault in {"stage", "queue_after"}:
             atomic = HOST_FILESYSTEM.atomic_replace_text
             failed = False
+            publications: list[tuple[str, object]] = []
 
             def interrupt_publication(path: Path, content: str) -> None:
                 nonlocal failed
                 value = json.loads(content)
+                publications.append((str(path), value))
+                current_task = next(
+                    item
+                    for item in resident.foreground_work_store(sid).load().tasks
+                    if item.task_id == task["task_id"]
+                )
+                target_stage = current_task.iteration_stage + 1
                 stage_match = recovery_fault == "stage" and path.name == "state.json" and any(
-                    item.get("iteration_stage") == 2 for item in value.get("tasks", []))
+                    item.get("task_id") == task["task_id"]
+                    and item.get("iteration_stage") == target_stage
+                    for item in value.get("tasks", [])
+                )
                 queue_match = recovery_fault == "queue_after" and path.stem == agent["agent_id"] and value.get("status") == "queued"
                 if not failed and (stage_match or queue_match):
                     failed = True
@@ -4925,7 +5177,12 @@ async def test_explicit_continue_resumes_original_interrupted_child_after_restar
                 with pytest.raises(ServiceError):
                     await replacement.continue_foreground_task(owner.client_id, resident.workspace_id, sid,
                         current["claim_version"], task["task_id"], task["revision"], request_id)
-            assert failed
+            assert failed, {
+                "publications": publications,
+                "task": task,
+                "original_child": original,
+                "current_child": resident.subagent_repository(sid).get(agent["agent_id"]),
+            }
             assert len(provider.requests) == requests_before_restart
             await replacement.continue_foreground_task(owner.client_id, resident.workspace_id, sid,
                 current["claim_version"], task["task_id"], task["revision"], request_id)

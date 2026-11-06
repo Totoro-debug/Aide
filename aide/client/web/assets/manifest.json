@@ -3,9 +3,9 @@
   "entry": "index.html",
   "files": [
     {
-      "path": "assets/index-C4zgbcFa.js",
-      "sha256": "22bfcc8c48e5c73b927cfa959a0dda84ae26cc953026a10990f98b837588bba2",
-      "bytes": 875816
+      "path": "assets/index-AOLLHq_O.js",
+      "sha256": "5a75d8a55eab6a14f97435dabc3fcae591da19fca5d988f08c8a827663261674",
+      "bytes": 875961
     },
     {
       "path": "assets/index-D4QIIzQ2.css",
@@ -19,7 +19,7 @@
     },
     {
       "path": "index.html",
-      "sha256": "cc1e3a80489dfe298f420030e097c9695712aba0d46fa0eb49280f5483e06899",
+      "sha256": "a698e50cd39c7d170bf026a3138873092a2ea33a7d44ab35c65b4366cc8350f2",
       "bytes": 483
     }
   ]

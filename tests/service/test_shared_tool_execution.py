@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -32,12 +32,80 @@ from tests.tools.test_shared_tool_context import _RecordingExecHost
 
 
 class _ToolProvider(_CountingProvider):
-    def response(self, messages: list[dict[str, Any]]) -> ModelResponse:
+    def __init__(self) -> None:
+        super().__init__()
+
+    def response(
+        self,
+        messages: list[dict[str, Any]],
+        tools: Sequence[dict[str, Any]] = (),
+    ) -> ModelResponse:
         user_index = max(i for i, message in enumerate(messages) if message["role"] == "user")
-        label = str(messages[user_index]["content"]).splitlines()[-1]
+        user_text = str(messages[user_index]["content"])
+        label = next(
+            (value for value in ("tool-0", "tool-1", "tool-schedule") if value in user_text),
+            user_text.splitlines()[-1],
+        )
         if label == "tool-schedule":
             self.schedule_started.set()
-        if any(message["role"] == "tool" for message in messages[user_index + 1 :]):
+        tool_names = {
+            name
+            for item in tools
+            if isinstance(item.get("function"), dict)
+            and isinstance((name := item["function"].get("name")), str)
+        }
+        current_tool_results = [
+            message for message in messages[user_index + 1 :]
+            if message.get("role") == "tool"
+        ]
+        if {"dispatch_worker", "finish"} <= tool_names:
+            worker_report = "Worker reports for automatic continuation:" in user_text
+            dispatched = any(item.get("name") == "dispatch_worker" for item in current_tool_results)
+            call = (
+                ModelToolCall(
+                    f"dispatch-{label}",
+                    "dispatch_worker",
+                    json.dumps({"task_id": label, "task": label, "context": []}),
+                )
+                if not dispatched and not worker_report
+                else ModelToolCall(
+                    f"finish-{label}", "finish", json.dumps({"response": "done"})
+                )
+            )
+            return ModelResponse(
+                message=AssistantModelMessage(content="", tool_calls=(call,)),
+                usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                finish_reason="tool_calls",
+            )
+        if str(messages[0].get("content", "")).startswith("You are an Aide Worker."):
+            completed_calls = {item.get("tool_call_id") for item in current_tool_results}
+            calls = (
+                ("write", "write_file", json.dumps({"path": "same.txt", "content": label})),
+                ("read", "read_file", '{"path":"same.txt"}'),
+                ("exec", "exec", '{"command":"Get-Location"}'),
+            )
+            next_call = next((item for item in calls if item[0] not in completed_calls), None)
+            if next_call is None:
+                return ModelResponse(
+                    message=AssistantModelMessage(content="done"),
+                    usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                    finish_reason="stop",
+                )
+            call_id, name, arguments = next_call
+            if name not in tool_names:
+                call_id, name, arguments = (
+                    f"search-{call_id}",
+                    "tool_search",
+                    json.dumps({"query": name}),
+                )
+            return ModelResponse(
+                message=AssistantModelMessage(
+                    content="", tool_calls=(ModelToolCall(call_id, name, arguments),)
+                ),
+                usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                finish_reason="tool_calls",
+            )
+        if current_tool_results:
             return ModelResponse(
                 message=AssistantModelMessage(content="done"),
                 usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
@@ -63,14 +131,14 @@ class _ToolProvider(_CountingProvider):
             return super().stream(**kwargs)
 
         async def emit() -> AsyncIterator[ModelStreamEvent]:
-            yield ModelCompleted(self.response(kwargs["messages"]))
+            yield ModelCompleted(self.response(kwargs["messages"], kwargs["tools"]))
 
         return emit()
 
     async def complete(self, **kwargs: Any) -> ModelResponse:
         if not kwargs["tools"]:
             return await super().complete(**kwargs)
-        return self.response(kwargs["messages"])
+        return self.response(kwargs["messages"], kwargs["tools"])
 
 
 @pytest.mark.asyncio
@@ -107,14 +175,22 @@ async def test_service_foreground_and_schedule_reuse_catalog_with_workspace_and_
         await asyncio.gather(
             *(case.submit(f"tool-{i}", f"run-{i}") for i, case in enumerate(cases))
         )
-        await asyncio.gather(*(case.completed(f"run-{i}") for i, case in enumerate(cases)))
+        async def wait_for_task_completion(case: Any) -> None:
+            store = case.workspace.foreground_work_store(case.claim.session_id)
+            async with asyncio.timeout(10):
+                while not any(task.state == "completed" for task in store.load().tasks):
+                    await asyncio.sleep(0)
+
+        await asyncio.gather(*(wait_for_task_completion(case) for case in cases))
         assert len(catalog_creations) == 1
         for i, case in enumerate(cases):
             path = case.workspace.workspace_path / "same.txt"
             assert path.read_text(encoding="utf-8") == f"tool-{i}"
+            workers = case.workspace.worker_store(case.claim.session_id).load().workers
+            assert len(workers) == 1 and workers[0].state == "ready"
             reads = [
                 message
-                for message in case.claim.loop.session.messages
+                for message in workers[0].conversation
                 if message.get("tool_call_id") == "read"
             ]
             assert reads[-1]["content"] == f"tool-{i}"
@@ -163,9 +239,16 @@ async def test_service_foreground_and_schedule_reuse_catalog_with_workspace_and_
         records = (await recorder.list_records(limit=200)).items
         for i, foreground in enumerate(cases):
             tools = [r for r in records if r.kind is TraceKind.TOOL and r.run_id == f"run-{i}"]
-            assert {r.tool_name for r in tools} == {"write_file", "read_file", "exec"}
-            assert len(tools) == 3
-            for record in tools:
+            business_tools = [
+                record for record in tools
+                if record.tool_name in {"write_file", "read_file", "exec"}
+            ]
+            assert {r.tool_name for r in business_tools} == {"write_file", "read_file", "exec"}
+            assert len(business_tools) == 3
+            assert {r.tool_name for r in tools} == {
+                "dispatch_worker", "finish", "write_file", "read_file", "exec"
+            }
+            for record in business_tools:
                 assert record.owner_session_id == foreground.claim.session_id
                 assert record.workspace_key == workspace_key_for(
                     foreground.workspace.workspace_path
@@ -182,7 +265,9 @@ async def test_service_foreground_and_schedule_reuse_catalog_with_workspace_and_
         scheduled = [
             r for r in records if r.kind is TraceKind.TOOL and r.owner_session_id == job.session_id
         ]
-        assert {r.tool_name for r in scheduled} == {"write_file", "read_file", "exec"}
+        assert {r.tool_name for r in scheduled} - {"dispatch_worker", "finish"} == {
+            "write_file", "read_file", "exec"
+        }
     finally:
         await service.stop()
 
@@ -226,23 +311,33 @@ async def test_service_cancels_only_the_calling_run_on_a_shared_exec_host(
         await asyncio.gather(
             *(case.submit(f"tool-{i}", f"run-{i}") for i, case in enumerate(cases))
         )
-        await asyncio.wait_for(
-            asyncio.gather(*(event.wait() for event in host.started.values())), timeout=5
-        )
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(event.wait() for event in host.started.values())), timeout=5
+            )
+        except TimeoutError:
+            pytest.fail("The foreground Workers did not both reach the shared Exec Host within 5 seconds.")
         case = cases[0]
-        await case.workspace.cancel(
-            case.client_id, case.claim.session_id, case.claim.version, "run-0"
+        work_store = case.workspace.foreground_work_store(case.claim.session_id)
+        work_snapshot = work_store.load()
+        task = next(item for item in work_snapshot.tasks if item.state == "waiting_for_workers")
+        await case.workspace.cancel_task(
+            case.client_id,
+            case.claim.session_id,
+            case.claim.version,
+            task.task_id,
+            work_snapshot.revision,
+            "cancel-run-0",
         )
         await asyncio.wait_for(host.cancelled["workspace-0"].wait(), timeout=5)
+        assert next(
+            item for item in work_store.load().tasks if item.task_id == task.task_id
+        ).state == "cancelled"
         assert not host.cancelled["workspace-1"].is_set()
         host.release.set()
         await cases[1].completed("run-1")
         assert not host.cancelled["workspace-1"].is_set()
         assert host.executed == [cases[1].workspace.workspace_path]
-        cancelled_event = await asyncio.wait_for(
-            cases[0].sink.wait_for("run.completed", "run-0"), timeout=5
-        )
-        assert cast(dict[str, object], cancelled_event["payload"])["finish_reason"] == "cancelled"
         recorder = service.trace_recorder
         assert isinstance(recorder, SQLiteTraceRecorder)
         await wait_for_trace_writer(recorder)

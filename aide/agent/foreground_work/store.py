@@ -26,7 +26,7 @@ from aide.agent.subagents.models import (
 from aide.agent.workspace_state import WorkspaceState
 from aide.utils.host_filesystem import HOST_FILESYSTEM
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 _MAX_QUESTION_LENGTH = 2_000
 _MAX_ANSWER_LENGTH = 10_000
 QuestionState = Literal[
@@ -126,6 +126,7 @@ class ForegroundWorkQuestion:
     answer_anchor_id: int | None = None
     options: tuple[ForegroundQuestionOption, ...] = ()
     owner_agent_id: str | None = None
+    revision: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -596,6 +597,11 @@ class ForegroundWorkStore:
                     item.answer_anchor_id,
                     item.options,
                     item.owner_agent_id,
+                    (
+                        current.revision + 1
+                        if item.task_id == prior.task_id and item.state in unresolved
+                        else item.revision
+                    ),
                 )
                 for item in questions
             ]
@@ -666,7 +672,7 @@ class ForegroundWorkStore:
         task = next((item for item in current.tasks if item.task_id == task_id), None)
         allowed_task_states = {"running"}
         if owner_agent_id is not None:
-            allowed_task_states.update({"waiting_for_answer", "completed"})
+            allowed_task_states.update({"waiting_for_answer", "waiting_for_workers", "completed"})
         if task is None or task.state not in allowed_task_states:
             raise ForegroundWorkConflict("question belongs to an inactive execution")
         if owner_agent_id is None and task.execution_id != execution_id:
@@ -694,6 +700,7 @@ class ForegroundWorkStore:
             "preparing",
             options=normalized_options,
             owner_agent_id=owner_agent_id,
+            revision=current.revision + 1,
         )
         return self._publish(
             ForegroundWorkSnapshot(
@@ -737,6 +744,7 @@ class ForegroundWorkStore:
                 item.answer_anchor_id,
                 item.options,
                 item.owner_agent_id,
+                current.revision + 1,
             )
             if item.question_id == question_id
             else item
@@ -899,7 +907,7 @@ class ForegroundWorkStore:
             and question.answer_fingerprint == fingerprint
         ):
             return current
-        if current.revision != expected_revision:
+        if question.revision != expected_revision:
             raise StaleForegroundWorkRevision("foreground-work revision is stale")
         if question.state != "pending":
             raise ForegroundWorkConflict("question is no longer awaiting an answer")
@@ -948,6 +956,7 @@ class ForegroundWorkStore:
             question.answer_anchor_id,
             question.options,
             question.owner_agent_id,
+            current.revision + 1,
         )
         updated_task = ForegroundWorkTask(
             task.task_id,
@@ -1007,7 +1016,14 @@ class ForegroundWorkStore:
         task = next((item for item in updated.tasks if item.task_id == question.task_id), None)
         if task is None:
             raise ForegroundWorkConflict("question task does not exist")
-        waiting_task = replace(task, state="waiting_for_answer")
+        waiting_task = replace(
+            task,
+            state=(
+                task.state
+                if task.execution_role == "router" and task.state == "waiting_for_workers"
+                else "waiting_for_answer"
+            ),
+        )
         return self._publish(
             ForegroundWorkSnapshot(
                 updated.revision + 1,
@@ -1037,12 +1053,16 @@ class ForegroundWorkStore:
             for question in current.questions
         )
         unresolved = {"preparing", "pending", "answer_received", "resuming", "executing"}
-        state: TaskState = task.state if task.state in {"running", "completed"} else (
+        state: TaskState = task.state if task.state in {
+            "running", "waiting_for_workers", "completed"
+        } else (
             "waiting_for_answer"
             if any(
                 question.task_id == task_id and question.state in unresolved
                 for question in questions
             )
+            else "waiting_for_workers"
+            if task.state == "waiting_for_answer" and task.execution_role == "router"
             else "interrupted"
         )
         if task.state == state and questions == current.questions:
@@ -1158,6 +1178,11 @@ class ForegroundWorkStore:
                 item.answer_anchor_id,
                 item.options,
                 item.owner_agent_id,
+                (
+                    current.revision + 1
+                    if item.task_id == task_id and item.state in unresolved
+                    else item.revision
+                ),
             )
             for item in current.questions
         )
@@ -1543,7 +1568,7 @@ class ForegroundWorkStore:
                     answer = request_id = fingerprint = resume_id = None
                     answer_kind = answer_option_id = None
                     anchor = None
-            changed |= (
+            question_changed = (
                 question_state != question.state
                 or answer != question.answer
                 or answer_kind != question.answer_kind
@@ -1553,6 +1578,7 @@ class ForegroundWorkStore:
                 or resume_id != question.resume_execution_id
                 or anchor != question.answer_anchor_id
             )
+            changed |= question_changed
             questions.append(
                 ForegroundWorkQuestion(
                     question.question_id,
@@ -1571,6 +1597,7 @@ class ForegroundWorkStore:
                     anchor,
                     question.options,
                     question.owner_agent_id,
+                    current.revision + 1 if question_changed else question.revision,
                 )
             )
             state_rank = {
@@ -1705,6 +1732,7 @@ class ForegroundWorkStore:
             ),
             options=question.options,
             owner_agent_id=question.owner_agent_id,
+            revision=current.revision + 1,
         )
         questions = tuple(
             updated if item.question_id == question_id else item for item in current.questions
@@ -1765,7 +1793,9 @@ def _snapshot_from_dict(value: object) -> ForegroundWorkSnapshot:
         raise ForegroundWorkError("Foreground Work state must be an object")
     data = cast(dict[str, object], value)
     schema_version = data.get("schema_version")
-    if type(schema_version) is not int or schema_version not in {1, 2, 3, 4, 5, 6, _SCHEMA_VERSION}:
+    if type(schema_version) is not int or schema_version not in {
+        1, 2, 3, 4, 5, 6, 7, _SCHEMA_VERSION
+    }:
         raise ForegroundWorkError("Foreground Work state has an unsupported version")
     expected_fields = {"schema_version", "revision", "tasks", "questions"}
     if schema_version >= 6:
@@ -1784,7 +1814,10 @@ def _snapshot_from_dict(value: object) -> ForegroundWorkSnapshot:
         _task_from_dict(item, schema_version=schema_version) for item in tasks_value
     )
     questions = tuple(
-        _question_from_dict(item, schema_version=schema_version) for item in questions_value
+        _question_from_dict(
+            item, schema_version=schema_version, default_revision=revision
+        )
+        for item in questions_value
     )
     deliveries = tuple(_delivery_from_dict(item) for item in deliveries_value)
     if len({item.task_id for item in tasks}) != len(tasks):
@@ -1959,6 +1992,7 @@ def _question_to_dict(question: ForegroundWorkQuestion) -> dict[str, object]:
         "tool_call_id": question.tool_call_id,
         "text": question.text,
         "state": question.state,
+        "revision": question.revision,
         "answer": question.answer,
         "answer_request_id": question.answer_request_id,
         "answer_fingerprint": question.answer_fingerprint,
@@ -1971,7 +2005,9 @@ def _question_to_dict(question: ForegroundWorkQuestion) -> dict[str, object]:
     }
 
 
-def _question_from_dict(value: object, *, schema_version: int) -> ForegroundWorkQuestion:
+def _question_from_dict(
+    value: object, *, schema_version: int, default_revision: int
+) -> ForegroundWorkQuestion:
     if not isinstance(value, dict):
         raise ForegroundWorkError("Foreground Work question is malformed")
     item = cast(dict[str, object], value)
@@ -1993,6 +2029,8 @@ def _question_from_dict(value: object, *, schema_version: int) -> ForegroundWork
         expected.update({"options", "answer_kind", "answer_option_id"})
     if schema_version >= 5:
         expected.add("owner_agent_id")
+    if schema_version >= 8:
+        expected.add("revision")
     if set(item) != expected:
         raise ForegroundWorkError("Foreground Work question has an unsupported shape")
     task_id = _require_stored_string(item["task_id"], "task_id")
@@ -2001,8 +2039,11 @@ def _question_from_dict(value: object, *, schema_version: int) -> ForegroundWork
     tool_call_id = _require_stored_string(item["tool_call_id"], "tool_call_id")
     text = _require_stored_string(item["text"], "text")
     generation, state, anchor = item["generation"], item["state"], item["answer_anchor_id"]
+    question_revision = item.get("revision", default_revision)
     if type(generation) is not int or generation < 1:
         raise ForegroundWorkError("Foreground Work question generation is malformed")
+    if type(question_revision) is not int or question_revision < 1:
+        raise ForegroundWorkError("Foreground Work question revision is malformed")
     if state not in {
         "preparing",
         "pending",
@@ -2073,6 +2114,7 @@ def _question_from_dict(value: object, *, schema_version: int) -> ForegroundWork
         anchor,
         options,
         owner_agent_id,
+        question_revision,
     )
 
 

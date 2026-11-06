@@ -560,7 +560,11 @@ class SubAgentRunnerExecutor:
             tool_context=tool_context,
             run_tools=(
                 (AskUserTool(),)
-                if record.source.kind is SubAgentSourceKind.FOREGROUND
+                if record.source.kind in {
+                    SubAgentSourceKind.FOREGROUND,
+                    SubAgentSourceKind.WORKER,
+                }
+                and record.source.task_id is not None
                 and "ask_user" in creator.tool_names
                 else ()
             ),

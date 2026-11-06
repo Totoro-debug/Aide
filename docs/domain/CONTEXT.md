@@ -77,7 +77,7 @@ Workspace-owned technical diagnostics associated with one Conversation Session r
 _Avoid_: Runtime Log, Conversation log, chat transcript, audit log, activity feed
 
 **Execution Trace**:
-The recorded model outputs and Tool invocations performed by the Personal Agent across foreground, SubAgent, Schedule, and auxiliary work, including their outcomes, timing, origin, reported usage when available, and the relationship between a model call and the Tool invocations it requests.
+The recorded model outputs and Tool invocations performed by the Personal Agent across Router, Worker, SubAgent, Schedule, and auxiliary work, including their outcomes, timing, origin, reported usage when available, and parent-root relationships between related executions.
 _Avoid_: Session Log, Conversation Session history, Agent Run Activity Group
 
 **Agent Runner**:
@@ -89,27 +89,31 @@ One complete Agent execution for one input against one Conversation Session, fro
 _Avoid_: Agent Turn, Runtime, Model call, Tool call
 
 **Foreground Task**:
-One unit of work authorized by a foreground user request, retaining its identity across Human Answers and automatic continuations until completed, cancelled, or replaced. It belongs to one Conversation Session and may delegate work to SubAgents.
+One unit of work authorized by a foreground user request, retaining its identity across Human Answers and automatic continuations until completed, cancelled, or replaced. It belongs to one Conversation Session and is coordinated by a Router that may dispatch persistent Workers.
 _Avoid_: Agent Run, Blackboard, Schedule Job, task list
 
-**Main Agent**:
-The Agent executing a foreground user input or a user Schedule occurrence that can delegate independent tasks to SubAgents.
-_Avoid_: SubAgent, independent Personal Agent
+**Router**:
+The restricted Agent execution that coordinates one foreground input or Schedule occurrence, asks Human Questions, dispatches Workers, handles Worker reports, and returns the user-facing response. It has no business Tool capabilities.
+_Avoid_: Main Agent, Worker, SubAgent
+
+**Worker**:
+A persistent, independently contextualized Agent execution assigned a bounded task by a Router. It uses existing authorized Tools, can manage its own SubAgents and Schedule Jobs, and returns a durable report to its Router.
+_Avoid_: Router, Main Agent, SubAgent, separate Conversation Session
 
 **SubAgent**:
-A single-use Agent associated with one Conversation Session that performs one independent delegated task and may outlive the Main Agent Run that created it. It cannot create further SubAgents.
+A single-use Agent associated with one Conversation Session and owning Worker that performs one independent delegated task. It cannot create further SubAgents; its result is consumed by its Worker rather than by the Router.
 _Avoid_: Nested Agent, independent Personal Agent
 
 **SubAgent Conversation**:
-The recorded task and model-and-Tool exchanges belonging to one single-use SubAgent, associated with its owning Conversation Session.
-_Avoid_: Conversation Session, Main Agent history
+The recorded task and model-and-Tool exchanges belonging to one single-use SubAgent, associated with its owning Conversation Session and Worker.
+_Avoid_: Conversation Session, Router history
 
 **SubAgent Pool**:
-The execution capacity and waiting queue owned by one Conversation Session for its SubAgents, independently of that Session's current Main Agent Run.
+The execution capacity and waiting queue owned by one Conversation Session for its Workers' SubAgents, independently of the current Router Run.
 _Avoid_: Agent Runner, global Run limit, foreground input queue
 
 **SubAgent Completion Continuation**:
-Main Agent work continued in the owning Conversation Session in response to a SubAgent's successful or failed completion, within the scope of the originating user request. Consuming the same result explicitly does not create another continuation, and cancellation or replacement of the originating task withdraws its automatic continuations.
+Worker work continued in the owning Conversation Session in response to a SubAgent's successful or failed completion. The Router receives the Worker report, not the SubAgent result; cancellation or replacement of the originating task withdraws its automatic continuations.
 _Avoid_: SubAgent restart, new user request, Schedule occurrence
 
 **ReAct Cycle**:
@@ -241,7 +245,7 @@ The sole public boundary for resolving, validating, authorizing, executing, and 
 _Avoid_: Direct Tool registry, plugin executor, shell wrapper
 
 **Human Question**:
-A structured request from a Main Agent or SubAgent for information or a decision from the user needed to advance authorized work, associated with its owning Conversation Session. Only work depending on the answer waits; independent work may continue.
+A structured request from a Router, Worker, or SubAgent for information or a decision from the user needed to advance authorized work, associated with its owning Conversation Session. Only work depending on the answer waits; independent work may continue.
 _Avoid_: Tool Confirmation, permission grant, ordinary progress message
 
 **Human Answer**:
@@ -249,7 +253,7 @@ The user's response to one Human Question, expressed as a supplied choice or fre
 _Avoid_: Tool Confirmation, automatic default, ordinary conversation input
 
 **Foreground Attention Summary**:
-The count-only projection attached to a Session navigation entry, reporting actionable Human Questions split between Main Agent and SubAgent owners plus interrupted Foreground Tasks that are not blocked by unresolved questions. It omits question text; detailed state is loaded only after the owning Session is opened under its current Session Claim.
+The count-only projection attached to a Session navigation entry, reporting actionable Human Questions by Router, Worker, and SubAgent ownership plus interrupted Foreground Tasks that are not blocked by unresolved questions. It omits question text; detailed state is loaded only after the owning Session is opened under its current Session Claim.
 _Avoid_: task inbox, question preview, unclaimed Session content
 
 **Tool Confirmation**:
@@ -329,7 +333,7 @@ The domain encompassing persistent scheduled tasks and the service that manages 
 _Avoid_: Scheduled Work, a single scheduled task, the scheduling service
 
 **Schedule Job**:
-One Workspace-owned persistent task in the Schedule domain with its own execution timing. A user-created Schedule Job has its own Conversation Session; a System Schedule Job may use a dedicated internal executor.
+One Workspace-owned persistent task in the Schedule domain with its own execution timing. Each user Schedule occurrence enters a dedicated Conversation Session through the Router; a Worker may create a user Schedule Job. A System Schedule Job may use a dedicated internal executor.
 _Avoid_: Schedule, Scheduled Work, shell cron job, reminder
 
 **Schedule Job Title**:

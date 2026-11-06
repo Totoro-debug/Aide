@@ -133,4 +133,5 @@ class _ProjectRemoval:
     workspace_id: str | None = None
     affected_client_ids: tuple[str, ...] = ()
     notification_client_ids: tuple[str, ...] = ()
+    blocked_by_schedule_fault: bool = False
     task: asyncio.Task[None] | None = None

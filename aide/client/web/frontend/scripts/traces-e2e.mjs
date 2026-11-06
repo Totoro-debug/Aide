@@ -92,13 +92,22 @@ function recordsFor(sessionId, workspaceKey, workspacePath) {
   return [
     record(sessionId, workspaceKey, workspacePath),
     record(sessionId, workspaceKey, workspacePath, {
+      record_id: "record-worker",
+      root_id: "root-worker",
+      origin: "foreground",
+      run_id: "run-worker",
+      agent_id: "worker-1",
+      parent_root_id: "root-main",
+      model: "model-worker",
+    }),
+    record(sessionId, workspaceKey, workspacePath, {
       record_id: "record-subagent",
       root_id: "root-subagent",
       subject_session_id: "subagent-session",
       origin: "subagent",
       run_id: "run-subagent",
       agent_id: "agent-child",
-      parent_root_id: "root-main",
+      parent_root_id: "root-worker",
       kind: "model",
       purpose: "subagent_run",
       model: "model-child",
@@ -293,6 +302,7 @@ try {
   assert.equal(listRequest.query.get("workspace_key"), routeKey);
   assert.equal(listRequest.query.get("owner_session_id"), conversation.session_id);
   await expect(page.getByRole("heading", { name: /Run run-main/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Worker worker-1/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: /SubAgent agent-child/ })).toBeVisible();
   await expect(page.getByRole("button", { name: "Open record-main", exact: true })).toBeVisible();
   // A purpose/tool present only after the first page must still be queryable.

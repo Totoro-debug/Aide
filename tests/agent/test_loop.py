@@ -370,6 +370,9 @@ def test_agent_loop_constructor_is_the_generation_composition_boundary() -> None
         "subagent_model_router",
         "trace_recorder",
         "foreground_work_store",
+        "worker_store",
+        "worker_scheduler",
+        "worker_generation_fencer",
     )
 
 

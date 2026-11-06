@@ -67,14 +67,140 @@ class _GenerationProvider(_RemovalProvider):
     ) -> AsyncIterator[ModelStreamEvent]:
         assert not self.closed, "an active Run used a closed generation resource"
         self.efforts.append(reasoning_effort)
-        latest_user = max(
+        system = str(messages[0].get("content", "")) if messages else ""
+        tool_names = {
+            name
+            for item in tools
+            if isinstance(item.get("function"), dict)
+            and isinstance((name := item["function"].get("name")), str)
+        }
+        router_request = {"dispatch_worker", "finish"} <= tool_names
+        worker_request = system.startswith("You are an Aide Worker.")
+        last_user_index = max(
+            (index for index, item in enumerate(messages) if item.get("role") == "user"),
+            default=-1,
+        )
+        latest_user = (
+            str(messages[last_user_index].get("content", ""))
+            if last_user_index >= 0 else ""
+        )
+        tool_results = [
+            item for item in messages[last_user_index + 1 :]
+            if item.get("role") == "tool"
+        ]
+        def scripted(content: str, tool_call: ModelToolCall | None = None) -> AsyncIterator[ModelStreamEvent]:
+            calls = () if tool_call is None else (tool_call,)
+
+            async def emit_scripted() -> AsyncIterator[ModelStreamEvent]:
+                yield ModelCompleted(
+                    ModelResponse(
+                        message=AssistantModelMessage(content=content, tool_calls=calls),
+                        usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                        finish_reason="tool_calls" if calls else "stop",
+                    )
+                )
+
+            return emit_scripted()
+
+        if router_request:
+            if "Worker reports for automatic continuation:" in latest_user:
+                reports = [
+                    line.removeprefix("Report: ")
+                    for line in latest_user.splitlines()
+                    if line.startswith("Report: ")
+                ]
+                report = next(
+                    (item for item in reports if item == "answer from queued input"),
+                    reports[0] if reports else "The Worker completed.",
+                )
+                return scripted(
+                    "",
+                    ModelToolCall(
+                        "router-finish-report",
+                        "finish",
+                        json.dumps({"response": report}),
+                    ),
+                )
+            dispatch = next(
+                (item for item in tool_results if item.get("name") == "dispatch_worker"),
+                None,
+            )
+            if dispatch is None:
+                user_text = latest_user.rsplit("## User Input\n\n", 1)[-1].split(
+                    "\n\n## Task goal", 1
+                )[0].strip()
+                task_label = next(
+                    (
+                        value for value in ("session-a", "session-b", "new work continues")
+                        if value in user_text
+                    ),
+                    "foreground-request",
+                )
+                return scripted(
+                    "",
+                    ModelToolCall(
+                        "generation-dispatch",
+                        "dispatch_worker",
+                        json.dumps({
+                            "task_id": f"generation-{task_label.replace(' ', '-')}",
+                            "task": user_text,
+                            "context": [],
+                        }),
+                    ),
+                )
+            try:
+                summary = json.loads(str(dispatch.get("content", "{}"))).get("summary")
+            except (TypeError, json.JSONDecodeError):
+                summary = None
+            response = summary if isinstance(summary, str) else "Worker completed."
+            return scripted(
+                "",
+                ModelToolCall(
+                    "router-finish-dispatch",
+                    "finish",
+                    json.dumps({"response": response}),
+                ),
+            )
+
+        if worker_request:
+            if any(item.get("tool_call_id") == "generation-write" for item in tool_results):
+                self.tool_completed.set()
+                return scripted("old generation tool completed")
+            if "session-a" in latest_user:
+                async def write_after_release() -> AsyncIterator[ModelStreamEvent]:
+                    self.session_a_started.set()
+                    await self.release_a.wait()
+                    yield ModelCompleted(
+                        ModelResponse(
+                            message=AssistantModelMessage(
+                                content="",
+                                tool_calls=(ModelToolCall(
+                                    "generation-write",
+                                    "write_file",
+                                    json.dumps({
+                                        "path": "generation.txt",
+                                        "content": "old Run survived",
+                                    }),
+                                ),),
+                            ),
+                            usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                            finish_reason="tool_calls",
+                        )
+                    )
+
+                return write_after_release()
+            if "new work continues" in latest_user:
+                return scripted("answer from queued input")
+            return scripted("answer from session B")
+
+        latest_user_index = max(
             (index for index, item in enumerate(messages) if item.get("role") == "user"),
             default=-1,
         )
         tool_result = next(
             (
                 item
-                for item in messages[latest_user + 1 :]
+                for item in messages[latest_user_index + 1 :]
                 if item.get("tool_call_id") == "generation-write"
             ),
             None,
@@ -255,10 +381,18 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
     home = _configured_home(tmp_path / "home")
     project = tmp_path / "project"
     project.mkdir()
+    class PreservingGenerationProvider(_GenerationProvider):
+        async def complete(self, **kwargs: Any) -> ModelResponse:
+            if "new work continues" in json.dumps(kwargs["messages"]):
+                return _response(
+                    '{"action":"keep","task_goal":null,"completion_boundary":null}'
+                )
+            return await super().complete(**kwargs)
+
     providers: list[_GenerationProvider] = []
 
     def provider_factory(_configuration: object) -> _GenerationProvider:
-        provider = _GenerationProvider()
+        provider = PreservingGenerationProvider()
         providers.append(provider)
         return provider
 
@@ -272,6 +406,18 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
     try:
         cli = await ServiceClient.connect_or_start(home, project, port=port)
         workspace = service.workspace(cli.workspace_id)
+
+        async def wait_for_assistant_response(text: str) -> None:
+            async with asyncio.timeout(10):
+                while not any(
+                    message.get("role") == "assistant" and message.get("content") == text
+                    for message in cast(
+                        list[dict[str, object]],
+                        workspace.session_snapshot(cli.session_id)["messages"],
+                    )
+                ):
+                    await asyncio.sleep(0.01)
+
         old_runtime = workspace.resources
         assert old_runtime is not None
         old_state = workspace.workspace_state
@@ -292,7 +438,10 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         )
         await workspace.schedule_service.add_user_job(job)
         await asyncio.wait_for(old_provider.schedule_started.wait(), 5)
-        assert workspace_loops(workspace)[cli.session_id].loop.has_active_run
+        worker_records = workspace.worker_store(cli.session_id).load().workers
+        assert len(worker_records) == 1 and worker_records[0].state == "working"
+        foreground_task = workspace.foreground_work_store(cli.session_id).load().tasks[-1]
+        assert foreground_task.state == "waiting_for_workers"
         assert workspace.schedule_service.status_snapshot().to_dict()["active_job_count"] == 1
         revision = service.config_view()["revision"]
         headers = {
@@ -327,12 +476,21 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
                 assert not old_provider.closed
                 await cli.submit_user_input("new work continues")
                 old_provider.release_a.set()
-                await asyncio.wait_for(confirmation.presented.wait(), 5)
-                assert _application(service)["status"] == "next-run-required"
+                try:
+                    await asyncio.wait_for(confirmation.presented.wait(), 5)
+                except TimeoutError:
+                    pytest.fail("The pending confirmation was not presented within 5 seconds.")
+                assert _application(service)["status"] == "active"
                 assert not old_provider.closed
                 assert confirmation.respond is not None
                 assert confirmation.respond(confirmation.token, "approved")
-                assert "old generation tool completed" in await _client_output(cli)
+                async with asyncio.timeout(10):
+                    while not any(
+                        worker.report is not None
+                        and worker.report.summary == "old generation tool completed"
+                        for worker in workspace.worker_store(cli.session_id).load().workers
+                    ):
+                        await asyncio.sleep(0.01)
                 assert (project / "generation.txt").read_text(
                     encoding="utf-8"
                 ) == "old Run survived"
@@ -371,17 +529,18 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         jobs = await workspace.schedule_service.public_snapshot()
         assert next(item for item in jobs if item.job_id == job.job_id).state.last_status == "ok"
         assert len(workspace._schedule_loops) == 1
-        assert "answer from session B" in await _client_output(cli)
+        await wait_for_assistant_response("answer from queued input")
         await cli.submit_user_input("session-b")
-        assert "answer from session B" in await _client_output(cli)
+        await wait_for_assistant_response("answer from session B")
         assert len(providers) == 1
         persisted = Session.load(cast(Any, old_state), cli.session_id)
         assert any(
-            message.get("content") == "old generation tool completed"
-            for message in persisted.messages
+            message.get("content") == "answer from session B" for message in persisted.messages
         )
         assert any(
-            message.get("content") == "answer from session B" for message in persisted.messages
+            worker.report is not None
+            and worker.report.summary == "old generation tool completed"
+            for worker in workspace.worker_store(cli.session_id).load().workers
         )
     finally:
         for provider in providers:
@@ -483,6 +642,28 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
     server, port = await _serve(service, home)
     cli: ServiceClient | None = None
     title_idle: asyncio.Task[None] | None = None
+
+    async def wait_for_answer(client: ServiceClient) -> None:
+        outputs: list[str] = []
+        try:
+            async with asyncio.timeout(10):
+                while "answer from session B" not in outputs:
+                    try:
+                        outputs.extend(await _client_output(client))
+                    except TimeoutError:
+                        continue
+        except TimeoutError as error:
+            session_id = client.session_id
+            workspace = service.workspace(client.workspace_id)
+            workers = workspace.worker_store(session_id).load().workers
+            foreground = workspace.foreground_work_store(session_id).load()
+            messages = workspace.session_snapshot(session_id)["messages"]
+            raise AssertionError(
+                f"outputs={outputs!r}; workers={[(item.state, None if item.report is None else item.report.summary) for item in workers]!r}; "
+                f"tasks={[(item.state, item.execution_role) for item in foreground.tasks]!r}; "
+                f"messages={messages!r}"
+            ) from error
+
     try:
         cli = await ServiceClient.connect_or_start(home, project, port=port)
         workspace = service.workspace(cli.workspace_id)
@@ -494,14 +675,14 @@ async def test_save_preserves_auto_title_after_foreground_run_has_finished(
                 await asyncio.sleep(0)
         old_provider = providers[0]
         await asyncio.wait_for(old_provider.title_started.wait(), 5)
-        assert "answer from session B" in await _client_output(cli)
+        await wait_for_answer(cli)
         old_loop = workspace_loops(workspace)[cli.session_id].loop
         async with asyncio.timeout(5):
             while old_loop.has_active_run:
                 await asyncio.sleep(0)
         generation_id = old_loop.generation_id
         await cli.submit_user_input("Complete a second foreground message")
-        assert "answer from session B" in await _client_output(cli)
+        await wait_for_answer(cli)
         assert old_loop.generation_id == generation_id
         title_idle = asyncio.create_task(old_loop.wait_for_restore_idle())
         await asyncio.sleep(0)

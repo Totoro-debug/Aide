@@ -729,7 +729,11 @@ def test_composition_and_store_signatures_match_current_contracts() -> None:
     assert _parameter_names(_direct_method(schedule_store, "_publish")) == (
         "self",
         "candidate",
+        "pending_occurrences",
     )
+    publish_default = _direct_method(schedule_store, "_publish").args.defaults[0]
+    assert isinstance(publish_default, ast.Constant)
+    assert publish_default.value is None
 
 
 def test_session_exposes_the_terminal_agent_run_commit() -> None:

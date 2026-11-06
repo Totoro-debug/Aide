@@ -15,7 +15,7 @@ from aide.client.cli.conversation import (
     _cli_question_answer,
     _cli_task_command,
 )
-from aide.provider.models import ModelStreamEvent
+from aide.provider.models import ModelMessages, ModelStreamEvent
 from tests.agent.test_fixed_catalog import _FixedCatalogProvider
 from tests.service.test_foreground_questions import _QuestionProvider
 from tests.terminal.test_conversation import (
@@ -76,6 +76,7 @@ async def test_cli_question_and_answer_through_live_service(
 ) -> None:
     provider = _QuestionProvider()
     provider.release_answer.set()
+    provider.framing_actions = ["replace", "keep"]
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -96,10 +97,21 @@ async def test_cli_question_and_answer_through_live_service(
         input_area.text = "/answer reports-directory"
         await pilot.press("enter")
         await _wait_for_turn(app, timeout=30)
-        async with asyncio.timeout(10):
-            while str(app.query_one("#foreground-question", Static).content):
-                await pilot.pause()
-        assert provider.answer_started.is_set()
+        try:
+            async with asyncio.timeout(10):
+                while str(app.query_one("#foreground-question", Static).content):
+                    await pilot.pause()
+        except TimeoutError as error:
+            raise AssertionError(
+                f"users={provider.user_texts!r}; questions={app._foreground_questions!r}; "
+                f"tasks={app._foreground_tasks!r}; widget="
+                f"{app.query_one('#foreground-question', Static).content!r}; "
+                f"screen={_visible_screen_text(app)!r}"
+            ) from error
+        assert provider.answer_started.is_set(), (
+            f"users={provider.user_texts!r}; questions={app._foreground_questions!r}; "
+            f"tasks={app._foreground_tasks!r}"
+        )
         assert provider.question_calls == 1
         assert sum("reports-directory" in text for text in provider.user_texts) == 1
         assert not (workspace / "after-question.txt").exists()
@@ -110,6 +122,7 @@ async def test_cli_question_and_answer_through_live_service(
         monkeypatch=monkeypatch,
         scenario=scenario,
         provider=cast(_FixedCatalogProvider, provider),
+        provider_framing=True,
         size=(120, 40),
     )
 
@@ -120,6 +133,7 @@ async def test_cli_restarts_service_before_answering_and_continuing_task(
 ) -> None:
     provider = _QuestionProvider()
     provider.release_answer.set()
+    provider.framing_actions = ["replace", "invalid"]
     home = tmp_path / "home"
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -140,7 +154,6 @@ async def test_cli_restarts_service_before_answering_and_continuing_task(
         match = re.search(r"Task ([^ ]+) · generation", task_text)
         assert match is not None, task_text
         task_id = match.group(1)
-        provider.framing_actions.append("invalid")
         input_area.text = "independent supplement with uncertain task framing"
         await pilot.press("enter")
         await _wait_for_turn(app, timeout=30)
@@ -155,6 +168,7 @@ async def test_cli_restarts_service_before_answering_and_continuing_task(
         monkeypatch=monkeypatch,
         scenario=create_interrupted_question,
         provider=cast(_FixedCatalogProvider, provider),
+        provider_framing=True,
         size=(120, 40),
     )
 
@@ -226,6 +240,7 @@ async def test_cli_question_options_keep_choice_and_text_answers_explicit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     provider = _QuestionProvider()
+    provider.framing_actions = ["replace", "keep", "replace"]
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -235,7 +250,9 @@ async def test_cli_question_options_keep_choice_and_text_answers_explicit(
         await pilot.press("enter")
         await _wait_for_turn(app, timeout=30)
         question_widget = await _wait_for_question(app, pilot, "Reports folder")
-        assert "Reports folder" in str(question_widget.content)
+        assert "Reports folder" in str(question_widget.content), (
+            f"questions={app._foreground_questions!r}; tasks={app._foreground_tasks!r}"
+        )
         assert "reports" in str(question_widget.content)
         assert "Archives folder" in str(question_widget.content)
         assert "archives" in str(question_widget.content)
@@ -243,14 +260,22 @@ async def test_cli_question_options_keep_choice_and_text_answers_explicit(
         input_area.text = "ordinary independent supplement"
         await pilot.press("enter")
         await _wait_for_turn(app, timeout=30)
-        assert "Reports folder" in str(question_widget.content)
+        assert "Reports folder" in str(question_widget.content), (
+            f"questions={app._foreground_questions!r}; tasks={app._foreground_tasks!r}"
+        )
 
         input_area.text = "/answer --option reports"
         await pilot.press("enter")
         await _wait_for_turn(app, timeout=30)
-        async with asyncio.timeout(10):
-            while str(question_widget.content):
-                await pilot.pause()
+        try:
+            async with asyncio.timeout(10):
+                while str(question_widget.content):
+                    await pilot.pause()
+        except TimeoutError as error:
+            raise AssertionError(
+                f"users={provider.user_texts!r}; questions={app._foreground_questions!r}; "
+                f"tasks={app._foreground_tasks!r}; widget={question_widget.content!r}"
+            ) from error
         assert "Reports folder" in provider.user_texts[-1]
         assert "--option reports" not in provider.user_texts[-1]
 
@@ -271,6 +296,7 @@ async def test_cli_question_options_keep_choice_and_text_answers_explicit(
         monkeypatch=monkeypatch,
         scenario=scenario,
         provider=cast(_FixedCatalogProvider, provider),
+        provider_framing=True,
         size=(120, 40),
     )
 
@@ -426,8 +452,30 @@ async def test_cli_answers_two_subagents_independently(
         input_area = app.query_one("#conversation-input", TextArea)
         input_area.text = "SubAgent question delegation request"
         await pilot.press("enter")
-        await _wait_for_turn(app, timeout=30)
-        widget = await _wait_for_question(app, pilot, "Which output should I prepare?")
+        try:
+            await _wait_for_turn(app, timeout=30)
+        except TimeoutError as error:
+            raise AssertionError(
+                (
+                    provider.router_tool_names,
+                    provider.worker_tool_names,
+                    provider.child_question_count,
+                    provider.requests[-4:],
+                    provider.router_report_texts,
+                )
+            ) from error
+        try:
+            widget = await _wait_for_question(app, pilot, "Which output should I prepare?")
+        except TimeoutError as error:
+            raise AssertionError(
+                (
+                    provider.router_tool_names,
+                    provider.worker_tool_names,
+                    provider.child_question_count,
+                    provider.requests[-4:],
+                    provider.router_report_texts,
+                )
+            ) from error
         async with asyncio.timeout(30):
             while len(app._foreground_questions) != 2:
                 await pilot.pause()
@@ -489,6 +537,11 @@ async def test_cli_answers_two_subagents_independently(
             while any([await child_status(agent_id) != "completed"
                        for agent_id in agents_by_question.values()]):
                 await pilot.pause()
+        async with asyncio.timeout(30):
+            while not any(
+                item.get("state") == "completed" for item in app._foreground_tasks
+            ):
+                await pilot.pause()
         assert not app._foreground_questions
         assert "Which output should I prepare?" not in str(widget.content)
         assert provider.child_question_count == 4
@@ -514,7 +567,26 @@ async def test_cli_shows_automatic_continuation_without_user_input(
     document = cast(Any, tomlkit.parse(VALID_CONFIG))
     document["models"]["routes"]["subagent"] = dict(document["models"]["routes"]["chat"])
     monkeypatch.setattr(terminal_fixture, "VALID_CONFIG", tomlkit.dumps(document))
-    provider = _DelegatingProvider()
+    class TerminalDelegatingProvider(_DelegatingProvider):
+        def _router_worker_response(
+            self, messages: ModelMessages, tool_names: set[str]
+        ) -> AsyncIterator[ModelStreamEvent] | None:
+            response = super()._router_worker_response(messages, tool_names)
+            latest_user = next(
+                (
+                    str(message.get("content", ""))
+                    for message in reversed(messages)
+                    if message.get("role") == "user"
+                ),
+                "",
+            )
+            if "Worker reports for automatic continuation:" in latest_user:
+                self.automatic_continuation_count += 1
+                self.automatic_continuation_started.set()
+                return self._events("Main automatically handled the delegated result.")
+            return response
+
+    provider = TerminalDelegatingProvider()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -592,7 +664,31 @@ async def test_cli_batches_terminal_subagent_results_in_one_automatic_continuati
     document = cast(Any, tomlkit.parse(VALID_CONFIG))
     document["models"]["routes"]["subagent"] = dict(document["models"]["routes"]["chat"])
     monkeypatch.setattr(terminal_fixture, "VALID_CONFIG", tomlkit.dumps(document))
-    provider = _BatchDelegatingProvider()
+    class TerminalBatchDelegatingProvider(_BatchDelegatingProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.include_batch_report = True
+
+        def _router_worker_response(
+            self, messages: ModelMessages, tool_names: set[str]
+        ) -> AsyncIterator[ModelStreamEvent] | None:
+            response = super()._router_worker_response(messages, tool_names)
+            latest_user = next(
+                (
+                    str(message.get("content", ""))
+                    for message in reversed(messages)
+                    if message.get("role") == "user"
+                ),
+                "",
+            )
+            if "Worker reports for automatic continuation:" in latest_user:
+                self.automatic_continuation_count += 1
+                self.automatic_continuation_started.set()
+                self.batch_auto_requests.append(latest_user)
+                return self._events("Main automatically handled the delegated result.")
+            return response
+
+    provider = TerminalBatchDelegatingProvider()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -616,7 +712,7 @@ async def test_cli_batches_terminal_subagent_results_in_one_automatic_continuati
         assert all(
             f"Batch child result {index}." in provider.batch_auto_requests[0]
             for index in range(1, 4)
-        )
+        ), provider.batch_auto_requests[0]
         assert "Automatic continuation from a SubAgent result." in _visible_screen_text(app)
 
     await _run_cli_terminal_case(

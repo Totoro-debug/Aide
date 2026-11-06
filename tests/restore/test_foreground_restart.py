@@ -1,13 +1,23 @@
 """Service startup completes interrupted durable Restore before exposing tasks."""
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
 from aide.agent.session.restore import RestoreMode
+from aide.agent.tools.tool_gateway import ModelToolCall
 from aide.config.config import ConfigLoader
+from aide.provider.models import (
+    AssistantModelMessage,
+    ModelCompleted,
+    ModelMessages,
+    ModelResponse,
+    ModelStreamEvent,
+    ModelUsage,
+)
 from aide.service.errors import ServiceError
 from aide.service.runtime import AgentService
 from tests.restore.conftest import AfterRestorePhase
@@ -18,6 +28,60 @@ from tests.service.test_foreground_questions import (
     _QuestionProvider,
     _wait_for_idle,
 )
+
+
+class _RestoreRouterWorkerProvider(_QuestionProvider):
+    def stream(
+        self,
+        *,
+        messages: ModelMessages,
+        tools: Sequence[dict[str, Any]],
+        model: str,
+        max_output: int,
+        temperature: float,
+        reasoning_effort: object,
+        timeout: int,
+        continuation: object = None,
+    ) -> AsyncIterator[ModelStreamEvent]:
+        system = messages[0].get("content", "") if messages else ""
+        if isinstance(system, str) and system.startswith("You are an Aide Worker."):
+            return super().stream(
+                messages=messages,
+                tools=tools,
+                model=model,
+                max_output=max_output,
+                temperature=temperature,
+                reasoning_effort=reasoning_effort,
+                timeout=timeout,
+                continuation=continuation,
+            )
+
+        user_text = "\n".join(
+            str(message.get("content", ""))
+            for message in messages
+            if message.get("role") == "user"
+        )
+        if "Worker reports for automatic continuation:" in user_text:
+            call = ModelToolCall("restore-finish", "finish", '{"response":"The answer is ready."}')
+        elif "write-answer" in user_text and not any(
+            message.get("tool_call_id") == "restore-dispatch" for message in messages
+        ):
+            call = ModelToolCall(
+                "restore-dispatch",
+                "dispatch_worker",
+                '{"task_id":"restore-answer","task":"Perform write-answer in answer.txt"}',
+            )
+        else:
+            call = ModelToolCall("restore-finish", "finish", '{"response":"The answer is ready."}')
+
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            yield ModelCompleted(ModelResponse(
+                message=AssistantModelMessage(content="", tool_calls=(call,)),
+                usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                finish_reason="tool_calls",
+            ))
+
+        return emit()
 
 
 @pytest.mark.asyncio
@@ -34,7 +98,7 @@ async def test_service_restart_finishes_restore_before_claim(
     directory.mkdir()
     target = directory / "answer.txt"
     target.write_bytes(b"original")
-    provider = _QuestionProvider()
+    provider = _RestoreRouterWorkerProvider()
     monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _: provider)
     service = AgentService(home, ConfigLoader(home).load())
     await service.start()

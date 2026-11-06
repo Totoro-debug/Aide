@@ -60,6 +60,9 @@ class _SourcesProvider(_ConcurrentProvider):
         self.child_release = asyncio.Event()
         self.schedule_finished = asyncio.Event()
         self.spawned = False
+        self.router_dispatches = 0
+        self.router_actions: list[tuple[str, str, bool]] = []
+        self.requests: list[tuple[str, str, str, tuple[str, ...]]] = []
 
     async def complete(self, **kwargs: Any) -> ModelResponse:
         system = kwargs["messages"][0]["content"]
@@ -69,6 +72,18 @@ class _SourcesProvider(_ConcurrentProvider):
             return _response("Captured summary or memory result.")
         if kwargs["model"] == "schedule-model":
             self.schedule_finished.set()
+            tool_names = {
+                tool["function"]["name"]
+                for tool in kwargs["tools"]
+                if isinstance(tool.get("function"), dict)
+            }
+            if "finish" in tool_names:
+                return _response(
+                    "",
+                    tool=ModelToolCall(
+                        "schedule-finish", "finish", '{"response":"Scheduled answer."}'
+                    ),
+                )
             return _response("Scheduled answer.")
         return await super().complete(**kwargs)
 
@@ -85,9 +100,91 @@ class _SourcesProvider(_ConcurrentProvider):
             return
         messages = kwargs["messages"]
         user = next(m["content"] for m in reversed(messages) if m.get("role") == "user")
+        system = messages[0].get("content", "") if messages else ""
+        tool_names = {
+            tool["function"]["name"]
+            for tool in kwargs["tools"]
+            if isinstance(tool.get("function"), dict)
+        }
+        tool_results = {
+            message.get("tool_call_id"): message
+            for message in messages
+            if message.get("role") == "tool"
+        }
+        latest_user_index = max(
+            index for index, message in enumerate(messages) if message.get("role") == "user"
+        )
+        current_dispatch_result = any(
+            message.get("role") == "tool" and message.get("name") == "dispatch_worker"
+            for message in messages[latest_user_index + 1 :]
+        )
+        self.requests.append((
+            str(system),
+            str(user),
+            str(model),
+            tuple(sorted(tool_names)),
+        ))
+        if (
+            isinstance(system, str)
+            and system.startswith("You are an Aide Worker.")
+            and user == "Reply."
+        ):
+            self.child_started.set()
+            await self.child_release.wait()
+            yield TextDelta("Child answer.")
+            yield ModelCompleted(_response("Child answer."))
+            return
+        if isinstance(system, str) and system.startswith("You are an Aide Worker."):
+            if "delegate" in user:
+                spawn = tool_results.get("trace-spawn")
+                if spawn is None:
+                    call = ModelToolCall(
+                        "trace-spawn", "spawn_agent", '{"title":"Child","task":"Reply."}'
+                    )
+                    yield ModelCompleted(_response("", tool=call))
+                    return
+                if "trace-wait" not in tool_results:
+                    agent_id = json.loads(str(spawn.get("content", "{}")))["agent_id"]
+                    call = ModelToolCall(
+                        "trace-wait",
+                        "wait_agent",
+                        json.dumps({"agent_ids": [agent_id]}),
+                    )
+                    yield ModelCompleted(_response("", tool=call))
+                    return
+            yield TextDelta("Main answer.")
+            yield ModelCompleted(_response("Main answer.", large=True))
+            return
+
+        if "dispatch_worker" in tool_names:
+            if "Worker reports for automatic continuation:" in str(user) or current_dispatch_result:
+                call = ModelToolCall(
+                    "trace-finish", "finish", '{"response":"Main answer."}'
+                )
+            else:
+                self.router_dispatches += 1
+                call = ModelToolCall(
+                    f"trace-dispatch-{self.router_dispatches}",
+                    "dispatch_worker",
+                    json.dumps({
+                        "task_id": f"trace-worker-{self.router_dispatches}",
+                        "task": str(user),
+                        "context": [],
+                    }),
+                )
+            large = self.router_dispatches == 3 and call.name == "dispatch_worker"
+            self.router_actions.append((str(user)[-80:], call.name, large))
+            yield ModelCompleted(
+                _response(
+                    "",
+                    tool=call,
+                    large=large,
+                )
+            )
+            return
+
         if "delegate" in user and not self.spawned:
-            names = {tool["function"]["name"] for tool in kwargs["tools"]}
-            if "spawn_agent" not in names:
+            if "spawn_agent" not in tool_names:
                 call = ModelToolCall("search", "tool_search", '{"query":"spawn agent"}')
             else:
                 self.spawned = True
@@ -178,15 +275,28 @@ async def _exercise_sources(
                 )
                 await asyncio.wait_for(sink.wait_for("run.completed", run_id), 10)
 
-            async with asyncio.timeout(15):
+            async with asyncio.timeout(30):
                 await asyncio.gather(run(0, "delegate", "run-a"), run(1, "other", "run-b"))
-                # The child still runs after its creating foreground run completes.
+                try:
+                    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
+                except TimeoutError:
+                    request_summary = [
+                        (system[:80], user[:120], model, tools)
+                        for system, user, model, tools in provider.requests
+                    ]
+                    pytest.fail(
+                        "SubAgent did not start; "
+                        f"router_dispatches={provider.router_dispatches}, "
+                        f"provider requests={request_summary!r}"
+                    )
                 assert provider.child_started.is_set() and not provider.child_release.is_set()
                 provider.child_release.set()
                 coordinator = workspace._subagent_coordinator(sessions[0])
                 assert coordinator is not None
                 children = coordinator.list().items
                 assert len(children) == 1
+                child_record = coordinator.get(children[0].agent_id)
+                assert child_record is not None
                 await coordinator.wait([children[0].agent_id], timeout_ms=5000)
                 await run(1, "continue", "run-summary")
                 assert workspace.resources is not None
@@ -228,17 +338,31 @@ async def _exercise_sources(
                 assert isinstance(recorder, SQLiteTraceRecorder)
                 await wait_for_trace_writer(recorder)
                 records = (await recorder.list_records(limit=200)).items
-                assert {record.purpose for record in records} == set(TracePurpose)
+                assert {record.purpose for record in records} == set(TracePurpose), (
+                    provider.router_actions,
+                    provider.router_dispatches,
+                )
                 assert all(record.endpoint is None for record in records)
-                roots = {r.run_id: r for r in records if r.purpose is TracePurpose.AGENT_RUN}
-                assert roots["run-a"].root_id != roots["run-b"].root_id
+                router_roots = {
+                    record.run_id: record
+                    for record in records
+                    if record.purpose is TracePurpose.AGENT_RUN and record.agent_id is None
+                }
+                assert router_roots["run-a"].root_id != router_roots["run-b"].root_id
+                worker = next(
+                    record
+                    for record in records
+                    if record.purpose is TracePurpose.AGENT_RUN
+                    and record.agent_id == child_record.source.worker_id
+                )
                 child = next(r for r in records if r.purpose is TracePurpose.SUBAGENT_RUN)
                 assert child.origin is TraceOrigin.SUBAGENT
                 assert child.owner_session_id == sessions[0]
-                assert child.run_id == "run-a"
-                assert child.parent_root_id == roots["run-a"].root_id
-                assert child.restore_run_token == roots["run-a"].restore_run_token
-                assert child.agent_id == children[0].agent_id
+                assert worker.parent_root_id == router_roots["run-a"].root_id
+                assert child.run_id == worker.run_id
+                assert child.parent_root_id == worker.root_id
+                assert child.restore_run_token == router_roots["run-a"].restore_run_token
+                assert child.agent_id == child_record.agent_id
                 for record in records:
                     if record.purpose in {TracePurpose.DREAM, TracePurpose.MCP_KEYWORDS}:
                         assert record.owner_session_id is None and record.run_id is None

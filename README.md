@@ -90,15 +90,15 @@ aide service stop
 
 ## 基本使用
 
-**对话与项目**：Web 普通对话默认使用 `~/.aide/chat`，可在设置的「常规与外观」中更改。点击侧栏「项目」旁的「＋」选择已有目录，可让 Agent 在该目录中工作。CLI 使用启动时的当前目录作为工作区。
+**对话与项目**：Web 普通对话默认使用 `~/.aide/chat`，可在设置的「常规与外观」中更改。点击侧栏「项目」旁的「＋」选择已有目录，可让 Agent 在该目录中工作；CLI 使用启动时的当前目录作为工作区。前台输入由受限 Router 协调，Router 可并行派发持久 Worker；Worker 使用当前授权执行工具并管理自己的 SubAgent，SubAgent 不可继续创建子任务。
 
 **历史会话**：Web 从侧栏打开历史对话；CLI 用 `/resume` 选择当前工作区的会话。同一工作区可同时运行多个会话，每个会话只能由一个客户端操作。同一服务支持一个 Web 客户端和多个 CLI 客户端。
 
-**待答问题与中断任务**：Web 会话侧栏和 CLI 的 `/resume` 列表显示待答问题来源数量及中断任务数量，不展示问题内容。打开对应会话并取得当前 Session Claim 后，Web 会展示全部 Main Agent 与 SubAgent 问题；CLI 会在问题中显示来源和 ID。单个问题可用 `/answer <text>`、`/answer --text <text>` 或 `/answer --option <id>` 回答；同一会话有多个问题时用 `/answer --question <question_id> <text>` 或配合 `--text`、`--option` 指定问题。`/task list` 查看前台任务，`/task continue <task_id>` 显式继续中断任务，`/task cancel <task_id>` 取消任务。回答和任务操作仍受当前 Session Claim 约束；服务重启后只展示待处理状态，不会自动重放。
+**待答问题与中断任务**：Web 会话侧栏和 CLI 的 `/resume` 列表显示待答问题来源数量及中断任务数量，不展示问题内容。打开对应会话并取得当前 Session Claim 后，Web 会展示 Router、Worker 与 SubAgent 提出的问题；CLI 会显示问题来源和 ID。单个问题可用 `/answer <text>`、`/answer --text <text>` 或 `/answer --option <id>` 回答；同一会话有多个问题时用 `/answer --question <question_id> <text>` 或配合 `--text`、`--option` 指定问题。`/task list` 查看前台任务，`/task continue <task_id>` 显式继续中断任务，`/task cancel <task_id>` 取消任务。回答和任务操作仍受当前 Session Claim 约束；服务重启后只展示待处理状态，不会自动重放。
 
-**统计与执行追踪**：Web 的「统计」页提供日期、工作区和调用维度筛选；从会话或统计页打开 Execution Trace，可查看模型输出、工具参数与最终结果，并在模型和关联工具之间跳转；协议和端点等补充信息默认折叠。可以只读查看 CLI 正在持有的会话，无需接管。页面通过手动刷新更新；统计基于仍保留的已保存记录，未知用量、采集缺失及丢弃的重试尝试不代表完整账单。删除会话会清理关联 Trace，其余记录保留 30 天；Restore 保留历史并标记被回退的执行。
+**统计与执行追踪**：Web 的「统计」页提供日期、工作区和调用维度筛选；从会话或统计页打开 Execution Trace，可查看模型输出、工具参数与最终结果，并按来源查看 Router、Worker、SubAgent 的父子执行关系，也可在模型和关联工具之间跳转；协议和端点等补充信息默认折叠。可以只读查看 CLI 正在持有的会话，无需接管。页面通过手动刷新更新；统计基于仍保留的已保存记录，未知用量、采集缺失及丢弃的重试尝试不代表完整账单。删除会话会清理关联 Trace，其余记录保留 30 天；Restore 保留历史并标记被回退的执行。
 
-**记忆与定时任务**：Web 项目菜单或普通对话菜单提供记忆、Dream 和定时任务入口。Dream 将待处理的对话摘要整理为长期记忆。也可以在对话中让 Agent 创建定时任务，例如「每天上午 9 点总结这个项目的待办事项」。
+**记忆与定时任务**：Web 项目菜单或普通对话菜单提供记忆、Dream 和定时任务入口。Dream 将待处理的对话摘要整理为长期记忆。每次定时任务到期都会作为新的输入交给 Router；Router 可派发 Worker，Worker 可创建后续定时任务。任务仍归原 Workspace 所有，并遵循现有权限与执行历史规则。
 
 **Skill 与 MCP**：将 Skill 放在 `~/.aide/skills/<技能名>/SKILL.md`，文件使用包含 `name`、`description` 的 YAML frontmatter；输入 `/<技能名> 任务描述` 调用。修改后用 `/reload_skill` 重新加载。MCP 可在 Web 设置中配置，示例见[配置模板](aide/templates/default-config.md)。
 

@@ -167,6 +167,7 @@ class WorkerStore:
         system_prompt: str,
         initial_message: str,
         restore_run_token: str | None,
+        trace_parent_root_id: str | None = None,
     ) -> WorkerRecord:
         """Persist a Worker before starting any model or Tool side effect."""
         if not isinstance(permission_snapshot, PermissionSnapshot):
@@ -230,6 +231,7 @@ class WorkerStore:
                 usage=empty_token_usage(),
                 state="working",
                 revision=1,
+                trace_parent_root_id=trace_parent_root_id,
             )
             return self._publish(
                 replace(current, revision=current.revision + 1, workers=(*current.workers, worker))

@@ -395,7 +395,11 @@ class AgentRunExecutor:
             store = foreground_work_store
             if (
                 store is None
-                or record.source.kind is not SubAgentSourceKind.FOREGROUND
+                or record.source.kind not in {
+                    SubAgentSourceKind.FOREGROUND,
+                    SubAgentSourceKind.WORKER,
+                }
+                or "ask_user" not in record.creator_snapshot.tool_names
                 or record.source.task_id is None
                 or record.source.task_generation is None
             ):
@@ -436,7 +440,11 @@ class AgentRunExecutor:
             store = foreground_work_store
             if (
                 store is not None
-                and record.source.kind is SubAgentSourceKind.FOREGROUND
+                and record.source.kind in {
+                    SubAgentSourceKind.FOREGROUND,
+                    SubAgentSourceKind.WORKER,
+                }
+                and "ask_user" in record.creator_snapshot.tool_names
                 and record.source.task_id is not None
                 and record.source.task_generation is not None
             ):
@@ -2081,10 +2089,34 @@ class AgentRunExecutor:
                     "permission_level": permission_snapshot.level,
                     "exec_shell": permission_snapshot.exec_shell.selector,
                 }
+                worker_context = list(explicit_context)
+                if manual_invocation is not None:
+                    skill_metadata = json.dumps(
+                        {
+                            "name": manual_invocation.metadata.name,
+                            "description": manual_invocation.metadata.description,
+                            "path": str(manual_invocation.metadata.path),
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    worker_context.append(
+                        "Manual Skill metadata: "
+                        + skill_metadata
+                        + "\nManual Skill instructions:\n"
+                        + manual_invocation.body
+                        + "\nManual Skill request:\n"
+                        + manual_invocation.request
+                    )
+                captured_worker_context = tuple(worker_context)
+                parent_trace = current_trace_scope()
+                trace_parent_root_id = (
+                    None if parent_trace is None else parent_trace.context.root_id
+                )
                 initial_message = "Assigned task:\n" + worker_task
-                if explicit_context:
+                if captured_worker_context:
                     initial_message += "\n\nExplicit context:\n" + "\n".join(
-                        f"- {item}" for item in explicit_context
+                        f"- {item}" for item in captured_worker_context
                     )
                 system_prompt = (
                     "You are an Aide Worker. Perform only the assigned task. You do not have the "
@@ -2103,7 +2135,7 @@ class AgentRunExecutor:
                 )
                 if existing is not None and (
                     existing.task != worker_task
-                    or existing.explicit_context != tuple(explicit_context)
+                    or existing.explicit_context != captured_worker_context
                 ):
                     raise ToolError("Worker dispatch identity was reused with different input.")
 
@@ -2137,7 +2169,7 @@ class AgentRunExecutor:
                             parent_generation=parent_generation,
                             task_id=worker_task_id,
                             task=worker_task,
-                            explicit_context=tuple(explicit_context),
+                            explicit_context=captured_worker_context,
                             runtime_facts=runtime_facts,
                             permission_snapshot=permission_snapshot,
                             session_model_configuration=worker_model_configuration,
@@ -2150,6 +2182,7 @@ class AgentRunExecutor:
                                 if restore_run_token is None
                                 else str(restore_run_token)
                             ),
+                            trace_parent_root_id=trace_parent_root_id,
                         )
                     except (OSError, UnicodeError, ValueError) as error:
                         raise ToolError("Worker assignment could not be persisted.") from error

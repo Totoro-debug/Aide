@@ -205,7 +205,10 @@ class SubAgentPool:
         if not self._accepting or self._shutdown:
             raise SubAgentRequestError("SubAgent Pool is not accepting resumed tasks")
         current = self._repository.get(agent_id)
-        if current is None or current.source.kind is not SubAgentSourceKind.FOREGROUND:
+        if current is None or current.source.kind not in {
+            SubAgentSourceKind.FOREGROUND,
+            SubAgentSourceKind.WORKER,
+        }:
             raise SubAgentRequestError("SubAgent question does not belong to this Session")
         if current.execution_id == execution_id and current.status in {
             SubAgentStatus.QUEUED,

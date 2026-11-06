@@ -11,6 +11,7 @@ from pathlib import Path
 from threading import Event
 from time import monotonic
 from typing import Any, cast
+from uuid import uuid4
 
 import aiohttp
 import pytest
@@ -157,7 +158,24 @@ async def _replay(root: Path, fault: str, monkeypatch: pytest.MonkeyPatch) -> di
                 ("cancel", "session-a"),
             ):
                 claim = workspace._claims[sid]
-                await workspace.input(client.client_id, sid, claim.version, text, run_id)
+                task_id = str(uuid4())
+                task = workspace.foreground_work_store(sid).begin_task(
+                    task_id,
+                    str(uuid4()),
+                    generation=1,
+                    permission_level=service.client_permission(client.client_id).current(),
+                    execution_role="agent",
+                ).tasks[-1]
+                await workspace.input(
+                    client.client_id,
+                    sid,
+                    claim.version,
+                    text,
+                    run_id,
+                    foreground_task_id=task.task_id,
+                    foreground_task_continue=True,
+                    foreground_task_generation=task.generation,
+                )
                 if run_id == "cancel":
                     await asyncio.wait_for(provider.session_a_started.wait(), 5)
                     await workspace.cancel(client.client_id, sid, claim.version, run_id)

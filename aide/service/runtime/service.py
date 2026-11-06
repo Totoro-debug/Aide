@@ -2243,6 +2243,11 @@ class AgentService:
             if workspace is not None:
                 workspace_id = operation.workspace_id
                 assert workspace_id is not None
+                if workspace.schedule_service.status_snapshot().status == "faulted":
+                    operation.blocked_by_schedule_fault = True
+                    raise ScheduleStoreFaultedError(
+                        "Project removal was blocked by a faulted Schedule Store."
+                    )
                 await workspace.close(interrupted=False)
                 claims = workspace.clear_claims_for_removal()
                 key = os.path.normcase(str(operation.path.resolve(strict=False)))
@@ -4136,6 +4141,12 @@ class AgentService:
                     await asyncio.shield(task)
                 except Exception as error:
                     errors.append(error)
+            if operation.blocked_by_schedule_fault:
+                errors.append(
+                    ScheduleStoreFaultedError(
+                        "Project removal was blocked by a faulted Schedule Store."
+                    )
+                )
         for client in self._clients.values():
             if client.disconnect_task is not None:
                 client.disconnect_task.cancel()

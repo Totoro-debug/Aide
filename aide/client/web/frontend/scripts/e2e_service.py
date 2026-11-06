@@ -271,9 +271,40 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     )
     if "provider failure" in normalized_requested_prompt:
         return web.Response(status=502, text="Fixture provider failure")
-    process_request = "process cycles" in normalized_requested_prompt
+    process_request = (
+        "process cycles" in normalized_requested_prompt
+        and "dispatch_worker" not in tool_names
+    )
     cancel_gap_request = "process cancel gap" in normalized_requested_prompt
-    if (process_request or cancel_gap_request) and "call-process-first" in current_tool_result_ids:
+    is_router = "dispatch_worker" in tool_names
+    trace_worker_fixture = is_router and any(
+        message.get("role") == "user"
+        and isinstance(message.get("content"), str)
+        and "trace worker cycle" in message["content"].lower()
+        for message in messages
+        if isinstance(message, dict)
+    )
+    if trace_worker_fixture and (
+        "Worker reports for automatic continuation:" in user_prompt
+        or "trace-worker-dispatch" in current_tool_result_ids
+    ):
+        chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [{
+            "index": 0, "id": "trace-router-finish", "type": "function", "function": {
+                "name": "finish", "arguments": json.dumps({"response": "Fixture response."}),
+            },
+        }]}))
+        chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls"))
+    elif trace_worker_fixture:
+        chunks.append(_chunk(request_id=request_id, model=model, delta={"tool_calls": [{
+            "index": 0, "id": "trace-worker-dispatch", "type": "function", "function": {
+                "name": "dispatch_worker", "arguments": json.dumps({
+                    "task_id": "trace-file-reader",
+                    "task": "process cycles: Read fixture.txt twice using the existing file Tool.",
+                }),
+            },
+        }]}))
+        chunks.append(_chunk(request_id=request_id, model=model, delta={}, finish_reason="tool_calls"))
+    elif (process_request or cancel_gap_request) and "call-process-first" in current_tool_result_ids:
         if cancel_gap_request or "call-process-second" in current_tool_result_ids:
             PROCESS_ENTERED.set()
             await PROCESS_RELEASE.wait()
@@ -302,7 +333,9 @@ async def _fixture_completion(request: web.Request) -> web.StreamResponse:
     )
     streaming_request = "streaming markdown" in user_prompt.lower()
     wait_command = "Get-Content -LiteralPath .\\fixture.txt -Wait"
-    if ("claimless continuation acceptance" in normalized_requested_prompt
+    if trace_worker_fixture:
+        pass
+    elif ("claimless continuation acceptance" in normalized_requested_prompt
             or "browser-claimless-child" in normalized_requested_prompt
             or "automatic continuation acceptance" in normalized_requested_prompt
             or "browser-auto-child" in normalized_requested_prompt
@@ -1120,7 +1153,7 @@ async def _run_e2e(provider_base_url: str) -> None:
                     continue
                 if command.strip() == "trace-run":
                     PROCESS_RELEASE.set()
-                    result = await project_client.submit_user_input("process cycles")
+                    result = await project_client.submit_user_input("trace worker cycle")
                     print(json.dumps({"session_id": project_client.session_id, **result}), flush=True)
                     continue
                 if command.strip() == "trace-claim":

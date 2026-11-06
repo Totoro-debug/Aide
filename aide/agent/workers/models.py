@@ -94,6 +94,7 @@ class WorkerRecord:
     report: WorkerReport | None = None
     report_delivery_state: WorkerDeliveryState | None = None
     report_receipt_id: str | None = None
+    trace_parent_root_id: str | None = None
 
     def __post_init__(self) -> None:
         require_uuid4_string(self.worker_id, field="worker_id")
@@ -139,6 +140,8 @@ class WorkerRecord:
             raise ValueError("Worker system prompt must not be empty")
         if self.restore_run_token is not None:
             require_uuid4_string(self.restore_run_token, field="restore_run_token")
+        if self.trace_parent_root_id is not None:
+            require_uuid4_string(self.trace_parent_root_id, field="trace_parent_root_id")
         if not isinstance(self.initial_message, str) or not self.initial_message.strip():
             raise ValueError("Worker initial message must not be empty")
         if (
@@ -217,6 +220,7 @@ class WorkerRecord:
             "report": None if self.report is None else self.report.to_dict(),
             "report_delivery_state": self.report_delivery_state,
             "report_receipt_id": self.report_receipt_id,
+            "trace_parent_root_id": self.trace_parent_root_id,
         }
 
 
@@ -291,8 +295,13 @@ def _record_from_dict(value: object) -> WorkerRecord:
         "report",
         "report_delivery_state",
         "report_receipt_id",
+        "trace_parent_root_id",
     }
-    if not isinstance(value, dict) or set(value) != fields:
+    legacy_fields = fields - {"trace_parent_root_id"}
+    if (
+        not isinstance(value, dict)
+        or frozenset(value) not in {frozenset(fields), frozenset(legacy_fields)}
+    ):
         raise ValueError("Worker record fields do not match the current format")
     data = cast(dict[str, object], value)
     context = data["explicit_context"]
@@ -354,6 +363,9 @@ def _record_from_dict(value: object) -> WorkerRecord:
             )
         ),
         report_receipt_id=_optional_string(data["report_receipt_id"], "report_receipt_id"),
+        trace_parent_root_id=_optional_string(
+            data.get("trace_parent_root_id"), "trace_parent_root_id"
+        ),
     )
 
 

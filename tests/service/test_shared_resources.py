@@ -63,6 +63,22 @@ class _CountingProvider:
     ) -> ModelResponse:
         if "shared schedule request" in json.dumps(messages):
             self.schedule_started.set()
+        if (
+            not tools
+            and len(messages) == 1
+            and messages[0].get("role") == "system"
+            and "### User input" in str(messages[0].get("content", ""))
+        ):
+            return ModelResponse(
+                message=AssistantModelMessage(
+                    content=(
+                        '{"action":"replace","task_goal":"answer the input",'
+                        '"completion_boundary":"return one answer"}'
+                    )
+                ),
+                usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                finish_reason="stop",
+            )
         del messages, tools, model, max_output, temperature, reasoning_effort, timeout, continuation
         return ModelResponse(
             message=AssistantModelMessage(content="ok"),
@@ -84,14 +100,29 @@ class _CountingProvider:
     ) -> AsyncIterator[ModelStreamEvent]:
         if "shared schedule request" in json.dumps(messages):
             self.schedule_started.set()
+        has_router_finish = any(
+            (
+                isinstance(tool.get("function"), dict)
+                and tool["function"].get("name") == "finish"
+            )
+            or tool.get("name") == "finish"
+            for tool in tools
+        )
         del messages, tools, model, max_output, temperature, reasoning_effort, timeout, continuation
 
         async def emit() -> AsyncIterator[ModelStreamEvent]:
             yield ModelCompleted(
                 ModelResponse(
-                    message=AssistantModelMessage(content="ok"),
+                    message=AssistantModelMessage(
+                        content="",
+                        tool_calls=(
+                            (ModelToolCall("finish-shared", "finish", '{"response":"ok"}'),)
+                            if has_router_finish
+                            else ()
+                        ),
+                    ) if has_router_finish else AssistantModelMessage(content="ok"),
                     usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
-                    finish_reason="stop",
+                    finish_reason="tool_calls" if has_router_finish else "stop",
                 )
             )
 
@@ -115,7 +146,24 @@ class _SessionCase:
 
     async def completed(self, run_id: str) -> None:
         event = await asyncio.wait_for(self.sink.wait_for("run.completed", run_id), timeout=5)
-        assert cast(dict[str, object], event["payload"])["finish_reason"] == "completed"
+        payload = cast(dict[str, object], event["payload"])
+        if payload["finish_reason"] == "suspended":
+            store = self.workspace.foreground_work_store(self.claim.session_id)
+            worker_store = self.workspace.worker_store(self.claim.session_id)
+            task_ids = {
+                worker.parent_task_id
+                for worker in worker_store.load().workers
+                if worker.runtime_facts.get("foreground_execution_id") == run_id
+            }
+            async with asyncio.timeout(5):
+                while not any(
+                    task.state == "completed"
+                    and (task.execution_id == run_id or task.task_id in task_ids)
+                    for task in store.load().tasks
+                ):
+                    await asyncio.sleep(0)
+        else:
+            assert payload["finish_reason"] == "completed"
 
     async def reload(self, request_id: str) -> dict[str, object]:
         return await self.workspace.service.handle_management(
@@ -428,27 +476,101 @@ class _ReloadProvider(_CountingProvider):
         if str(messages[0].get("content", "")).startswith("Generate a concise title"):
             return super().stream(**kwargs)
         self.requests.append(deepcopy(list(messages)))
-        block = "hold-old" in json.dumps(messages) and not self.blocked
-        self.blocked = self.blocked or block
+        tools = kwargs["tools"]
+        tool_names = {
+            name
+            for item in tools
+            if isinstance(item.get("function"), dict)
+            and isinstance((name := item["function"].get("name")), str)
+        }
+        user_index = max(
+            (index for index, item in enumerate(messages) if item.get("role") == "user"),
+            default=-1,
+        )
+        latest_user = str(messages[user_index].get("content", "")) if user_index >= 0 else ""
+        tool_results = [
+            item for item in messages[user_index + 1 :]
+            if item.get("role") == "tool"
+        ]
+        router_request = {"dispatch_worker", "finish"} <= tool_names
+        worker_request = str(messages[0].get("content", "")).startswith("You are an Aide Worker.")
 
-        async def emit() -> AsyncIterator[ModelStreamEvent]:
-            if block:
-                self.started.set()
-                await self.release.wait()
-                response = ModelResponse(
-                    message=AssistantModelMessage(
-                        content="",
-                        tool_calls=(ModelToolCall("read", "read_file", '{"path":"fixture.txt"}'),),
-                    ),
-                    usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
-                    finish_reason="tool_calls",
+        def scripted(
+            content: str, tool_call: ModelToolCall | None = None
+        ) -> AsyncIterator[ModelStreamEvent]:
+            async def emit_scripted() -> AsyncIterator[ModelStreamEvent]:
+                yield ModelCompleted(_response(content, tool_call=tool_call))
+
+            return emit_scripted()
+
+        if router_request:
+            if "Worker reports for automatic continuation:" in latest_user:
+                report = next(
+                    (line.removeprefix("Report: ") for line in latest_user.splitlines()
+                     if line.startswith("Report: ")),
+                    "Worker completed.",
                 )
-                yield ModelCompleted(response)
-            else:
-                async for event in super(_ReloadProvider, self).stream(**kwargs):
-                    yield event
+                return scripted(
+                    "", ModelToolCall("reload-finish-report", "finish", json.dumps({"response": report}))
+                )
+            dispatch = next(
+                (item for item in tool_results if item.get("name") == "dispatch_worker"),
+                None,
+            )
+            if dispatch is None:
+                task = next(
+                    (value for value in ("hold-old", "other-workspace", "later-first-workspace")
+                     if value in latest_user),
+                    latest_user,
+                )
+                return scripted(
+                    "",
+                    ModelToolCall(
+                        "reload-dispatch",
+                        "dispatch_worker",
+                        json.dumps({"task_id": task, "task": task, "context": []}),
+                    ),
+                )
+            try:
+                summary = json.loads(str(dispatch.get("content", "{}"))).get("summary")
+            except (TypeError, json.JSONDecodeError):
+                summary = None
+            return scripted(
+                "",
+                ModelToolCall(
+                    "reload-finish",
+                    "finish",
+                    json.dumps({"response": summary if isinstance(summary, str) else "Worker completed."}),
+                ),
+            )
 
-        return emit()
+        if worker_request:
+            read_result = next(
+                (item for item in tool_results if item.get("tool_call_id") == "read"),
+                None,
+            )
+            if "hold-old" not in latest_user:
+                return scripted("snapshot run completed")
+            if read_result is not None:
+                return scripted("snapshot run completed")
+            if "read_file" not in tool_names:
+                return scripted("", ModelToolCall("search-read", "tool_search", '{"query":"read file"}'))
+
+            async def read_after_release() -> AsyncIterator[ModelStreamEvent]:
+                if not self.blocked:
+                    self.blocked = True
+                    self.started.set()
+                    await self.release.wait()
+                yield ModelCompleted(
+                    _response(
+                        "",
+                        tool_call=ModelToolCall("read", "read_file", '{"path":"fixture.txt"}'),
+                    )
+                )
+
+            return read_after_release()
+
+        return super().stream(**kwargs)
 
 
 @pytest.mark.asyncio
@@ -477,19 +599,47 @@ async def test_global_reload_keeps_active_run_snapshot_and_updates_other_workspa
         assert new_snapshot is not old_snapshot
         await second.submit("/reviewer other-workspace", "other-run")
         await second.completed("other-run")
-        assert first.claim.loop.has_active_run
+        active_workers = first.workspace.worker_store(
+            first.claim.session_id
+        ).load().workers
+        assert any(worker.state == "working" for worker in active_workers)
         provider.release.set()
         await first.completed("old-run")
-        assert len(provider.requests) == 3
-        for request in (provider.requests[0], provider.requests[2]):
-            assert "OLD_SKILL_BODY" in json.dumps(request)
-            assert "NEW_SKILL_BODY" not in json.dumps(request)
-        assert "NEW_SKILL_BODY" in json.dumps(provider.requests[1])
-        assert "first workspace file" in json.dumps(provider.requests[2])
-        assert "first workspace file" not in json.dumps(provider.requests[1])
+        old_run_requests = [
+            request for request in provider.requests if "hold-old" in json.dumps(request)
+        ]
+        old_worker_requests = [
+            request for request in old_run_requests
+            if str(request[0].get("content", "")).startswith("You are an Aide Worker.")
+        ]
+        other_workspace_requests = [
+            request for request in provider.requests if "other-workspace" in json.dumps(request)
+        ]
+        assert old_run_requests
+        assert old_worker_requests
+        assert other_workspace_requests
+        assert all(
+            "OLD_SKILL_BODY" in json.dumps(request) for request in old_worker_requests
+        ), [
+            [
+                {"role": message.get("role"), "content": str(message.get("content", ""))[:500]}
+                for message in request
+                if message.get("role") in {"system", "user"}
+            ]
+            for request in old_worker_requests
+        ]
+        assert all("NEW_SKILL_BODY" not in json.dumps(request) for request in old_worker_requests)
+        assert any("NEW_SKILL_BODY" in json.dumps(request) for request in other_workspace_requests)
+        assert all("first workspace file" not in json.dumps(request)
+                   for request in other_workspace_requests)
+        assert any("first workspace file" in json.dumps(request) for request in old_run_requests)
         await first.submit("/reviewer later-first-workspace", "later-run")
         await first.completed("later-run")
-        assert "NEW_SKILL_BODY" in str(provider.requests[-1][-1]["content"])
+        assert any(
+            "NEW_SKILL_BODY" in json.dumps(request)
+            for request in provider.requests
+            if "later-first-workspace" in json.dumps(request)
+        )
         assert service.skill_loader.skills is new_snapshot
     finally:
         provider.release.set()

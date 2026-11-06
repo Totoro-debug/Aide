@@ -26,13 +26,35 @@ from aide.service.client import ServiceClient
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
 from tests.fixtures.cli_service import cli_service
 from tests.fixtures.mcp_wire import ObservedLifetimes, stdio_wire_configuration, wire_tool
-from tests.service.test_service_concurrency import _client_output, _ConcurrentProvider
+from tests.service.test_service_concurrency import _ConcurrentProvider
 
 
 class _EchoProvider(_ConcurrentProvider):
     def __init__(self) -> None:
         super().__init__()
         self.schemas: list[list[dict[str, Any]]] = []
+        self.router_dispatches = 0
+        self.debug_requests: list[tuple[str, set[str], list[tuple[str, str, str]]]] = []
+        self.echo_completed = {value: asyncio.Event() for value in ("first", "second")}
+
+    @staticmethod
+    def _events(
+        content: str, *, tool_call: ModelToolCall | None = None
+    ) -> AsyncIterator[ModelStreamEvent]:
+        calls = () if tool_call is None else (tool_call,)
+
+        async def emit() -> AsyncIterator[ModelStreamEvent]:
+            if content:
+                yield TextDelta(content)
+            yield ModelCompleted(
+                ModelResponse(
+                    message=AssistantModelMessage(content=content, tool_calls=calls),
+                    usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                    finish_reason="tool_calls" if calls else "stop",
+                )
+            )
+
+        return emit()
 
     def stream(self, **kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
         messages = kwargs["messages"]
@@ -40,40 +62,99 @@ class _EchoProvider(_ConcurrentProvider):
             return super().stream(**kwargs)
         tools = kwargs["tools"]
         self.schemas.append(list(tools))
+        tool_names = {
+            item["function"]["name"]
+            for item in tools
+            if isinstance(item.get("function"), dict)
+            and isinstance(item["function"].get("name"), str)
+        }
         last_user = max(i for i, item in enumerate(messages) if item["role"] == "user")
         tail = messages[last_user + 1 :]
-        user = messages[last_user]["content"]
+        user = str(messages[last_user]["content"])
+        self.debug_requests.append(
+            (
+                user[-180:],
+                tool_names,
+                [
+                    (
+                        str(item.get("role", "")),
+                        str(item.get("name", "")),
+                        str(item.get("content", ""))[-100:],
+                    )
+                    for item in messages[-5:]
+                ],
+            )
+        )
         value = "second" if "second" in user else "first"
+
+        if "dispatch_worker" in tool_names:
+            reported = "Worker reports for automatic continuation:" in user
+            dispatched = any(
+                item.get("role") == "tool" and item.get("name") == "dispatch_worker"
+                for item in tail
+            )
+            if reported:
+                return self._events(
+                    "done",
+                    tool_call=ModelToolCall(
+                        f"mcp-finish-{self.router_dispatches}",
+                        "finish",
+                        '{"response":"done"}',
+                    ),
+                )
+            if dispatched:
+                return self._events(
+                    "",
+                    tool_call=ModelToolCall(
+                        f"mcp-wait-{self.router_dispatches}",
+                        "finish",
+                        '{"response":"The Worker is working on the assigned task."}',
+                    ),
+                )
+            self.router_dispatches += 1
+            return self._events(
+                "",
+                tool_call=ModelToolCall(
+                    f"mcp-dispatch-{self.router_dispatches}",
+                    "dispatch_worker",
+                    json.dumps(
+                        {
+                            "task_id": f"mcp-worker-{self.router_dispatches}",
+                            "task": user,
+                            "context": [],
+                        }
+                    ),
+                ),
+            )
+
         remote = next(
             (item for item in tools if item["function"]["name"] == "mcp_local_echo"), None
         )
         done = any(
-            item["role"] == "tool" and item["content"] == f"{value}:inherited" for item in tail
+            item.get("role") == "tool" and item.get("content") == f"{value}:inherited"
+            for item in messages
         )
+        if done:
+            self.echo_completed[value].set()
+            return self._events("done")
         name = "mcp_local_echo" if remote else "tool_search"
         arguments = {"value": value} if remote else {"query": "echo"}
+        return self._events(
+            "",
+            tool_call=ModelToolCall(
+                f"{name}-{value}", name, json.dumps(arguments)
+            ),
+        )
 
-        async def emit() -> AsyncIterator[ModelStreamEvent]:
-            if done:
-                yield TextDelta("done")
-            yield ModelCompleted(
-                ModelResponse(
-                    message=AssistantModelMessage(
-                        content="done" if done else "",
-                        tool_calls=()
-                        if done
-                        else (
-                            ModelToolCall(
-                                id=f"{name}-{value}", name=name, arguments=json.dumps(arguments)
-                            ),
-                        ),
-                    ),
-                    usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
-                    finish_reason="stop" if done else "tool_calls",
-                )
-            )
 
-        return emit()
+async def _client_output_containing(client: ServiceClient, expected: str) -> list[str]:
+    output: list[str] = []
+    async with asyncio.timeout(30):
+        while True:
+            message = await client.bus.get_outbound()
+            output.append(message.content)
+            if expected in message.content:
+                return output
 
 
 @pytest.mark.asyncio
@@ -119,7 +200,12 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
             old_tools = original.mcp_snapshot
             schemas = [tool.to_schema() for tool in old_tools]
             await client.submit_user_input("first echo")
-            assert "done" in await _client_output(client)
+            await asyncio.wait_for(provider.echo_completed["first"].wait(), timeout=15)
+            try:
+                output = await _client_output_containing(client, "done")
+            except TimeoutError as error:
+                raise AssertionError(provider.debug_requests) from error
+            assert "done" in output, (output, provider.debug_requests)
             selected = await client.management_dispatcher.resume(client.session_id)
             assert selected.resumed_session_id == client.session_id
             assert workspace.resources is original
@@ -136,7 +222,16 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
                 assert [tool.to_schema() for tool in old_tools] == schemas
                 assert len(observed.processes) == 1
             await client.submit_user_input("second echo")
-            assert "done" in await _client_output(client)
+            await asyncio.wait_for(provider.echo_completed["second"].wait(), timeout=15)
+            assert "done" in await _client_output_containing(client, "done")
+            async with asyncio.timeout(15):
+                while True:
+                    workers = workspace.worker_store(client.session_id).load().workers
+                    if len(workers) == 2 and all(
+                        worker.report is not None for worker in workers
+                    ):
+                        break
+                    await asyncio.sleep(0.01)
             assert len(observed.processes) == 1
             assert cast(dict[str, object], service.config_view()["application"])["status"] == "active"
             if save_before_next_run:
@@ -147,10 +242,14 @@ async def test_cli_real_mcp_flow_persists_result_reuses_session_snapshot_and_clo
             await claim.loop.session.wait_for_pending_persist()
             persisted = Session.load(workspace.workspace_state, client.session_id)
             contents = [
-                item.get("content") for item in persisted.messages if item["role"] == "tool"
+                item.get("content")
+                for worker in workers
+                for item in worker.conversation
+                if item.get("role") == "tool"
             ]
             assert "first:inherited" in contents
             assert "second:inherited" in contents
+            assert any(item.get("role") == "user" for item in persisted.messages)
             exposed = [
                 item
                 for request in provider.schemas

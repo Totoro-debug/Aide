@@ -21,7 +21,10 @@ from aide.provider.models import (
     ModelUsage,
 )
 from aide.service.runtime import AgentService
+from aide.trace.sqlite_recorder import SQLiteTraceRecorder
+from aide.trace.types import TraceOrigin, TraceRecordFilters
 from tests.configuration.test_config import MINIMAL_VALID_CONFIG
+from tests.fixtures.trace import wait_for_trace_writer
 
 
 def _response(content: str) -> ModelResponse:
@@ -177,6 +180,7 @@ class _WorkerSubAgentProvider(_ParallelWorkerProvider):
         self.followup_started = asyncio.Event()
         self.release_followup = asyncio.Event()
         self.router_report_texts: list[str] = []
+        self.router_tool_names: set[str] = set()
         self.worker_tool_names: dict[str, set[str]] = {}
         self.subagent_tool_names: set[str] = set()
         self.calls: list[str] = []
@@ -207,6 +211,8 @@ class _WorkerSubAgentProvider(_ParallelWorkerProvider):
             if isinstance(schema.get("function"), dict)
             and isinstance(schema["function"].get("name"), str)
         }
+        if not (isinstance(system, str) and system.startswith("You are an Aide Worker.")):
+            self.router_tool_names.update(tool_names)
 
         async def emit() -> AsyncIterator[ModelStreamEvent]:
             child_label = next(
@@ -1415,8 +1421,9 @@ async def test_parallel_workers_overlap_and_reports_produce_one_router_reply(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client_kind", ["cli", "web"])
 async def test_parallel_workers_manage_owned_subagent_results_before_router_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client_kind: str,
 ) -> None:
     from tests.service.test_service_concurrency import _CollectingSink
 
@@ -1429,7 +1436,7 @@ async def test_parallel_workers_manage_owned_subagent_results_before_router_repo
     service = AgentService(home, ConfigLoader(home).load())
     await service.start()
     try:
-        client = await service.register_client("cli")
+        client = await service.register_client(client_kind)
         service.client_permission(client.client_id).select("read-only")
         sink = _CollectingSink()
         await service.connect_client(client.client_id, sink)
@@ -1451,6 +1458,7 @@ async def test_parallel_workers_manage_owned_subagent_results_before_router_repo
 
         await asyncio.wait_for(provider.two_workers_started.wait(), timeout=10)
         assert provider.worker_started == 2
+        assert provider.router_tool_names == {"ask_user", "dispatch_worker", "finish"}
         assert set(provider.worker_tool_names) == {"delegating", "file-reader"}
         provider.release_workers.set()
         await asyncio.wait_for(provider.two_subagents_started.wait(), timeout=10)
@@ -1536,6 +1544,38 @@ async def test_parallel_workers_manage_owned_subagent_results_before_router_repo
             and message.get("content") == "Both Worker reports are complete."
             for message in messages
         ) == 1
+
+        recorder = service.trace_recorder
+        assert isinstance(recorder, SQLiteTraceRecorder)
+        await wait_for_trace_writer(recorder)
+        trace_records = (await recorder.list_records(
+            TraceRecordFilters(owner_session_id=session_id), limit=500,
+        )).items
+        roots = {record.root_id: record for record in trace_records}
+        router_roots = {
+            record.root_id
+            for record in roots.values()
+            if record.origin is TraceOrigin.FOREGROUND
+            and record.agent_id is None
+        }
+        assert router_roots
+        worker_ids = {worker.worker_id for worker in workers}
+        worker_roots = {
+            record.agent_id: record
+            for record in roots.values()
+            if record.origin is TraceOrigin.FOREGROUND and record.agent_id in worker_ids
+        }
+        assert set(worker_roots) == worker_ids
+        assert all(record.parent_root_id in router_roots for record in worker_roots.values())
+        for child_id in child_ids:
+            child = next(
+                record for record in roots.values()
+                if record.origin is TraceOrigin.SUBAGENT and record.agent_id == child_id
+            )
+            child_record = repository.get(child_id)
+            assert child_record is not None
+            assert child_record.source.worker_id in worker_roots
+            assert child.parent_root_id == worker_roots[child_record.source.worker_id].root_id
     finally:
         provider.release_workers.set()
         provider.release_subagent.set()

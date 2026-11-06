@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -275,6 +276,9 @@ async def test_waiting_questions_release_capacity_and_answer_resumes_at_fifo_tai
         task_id=str(uuid4()),
         task_generation=1,
     )
+    question_snapshot = replace(
+        _snapshot(), tool_names=("read_file", "list_dir", "ask_user")
+    )
     records: list[SubAgentRecord] = []
     for index in range(10):
         record = pool.submit(
@@ -282,7 +286,7 @@ async def test_waiting_questions_release_capacity_and_answer_resumes_at_fifo_tai
             task=f"Do question task {index}",
             parent_run_id=_RUN_ID,
             source=source,
-            creator_snapshot=_snapshot(),
+            creator_snapshot=question_snapshot,
         )
         records.append(record)
         executor.release[record.agent_id] = asyncio.Event()

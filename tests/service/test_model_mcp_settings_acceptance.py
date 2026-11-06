@@ -68,8 +68,17 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
             (index for index, item in enumerate(messages) if item["role"] == "user"), default=-1
         )
         current_messages = messages[last_user + 1 :]
-        user = user.rsplit("## User Input\n\n", 1)[-1]
         tools = [item["function"]["name"] for item in body.get("tools", [])]
+        user_text = user
+        user = next(
+            (
+                value for value in (
+                    "foreground-old", "scheduled-old", "foreground-new", "scheduled-new"
+                ) if value in user_text
+            ),
+            user.rsplit("## User Input\n\n", 1)[-1],
+        )
+        router_request = {"dispatch_worker", "finish"} <= set(tools)
         key_matches = request.headers.get("Authorization") == f"Bearer {keys[model]}"
         assert key_matches, "Model request used the wrong generation credential"
         model_calls.append(
@@ -83,17 +92,85 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
                 "key_matches": key_matches,
             }
         )
-        if tools and user in gates and not any(item["role"] == "tool" for item in current_messages):
+        if (
+            not router_request
+            and tools
+            and user in gates
+            and not any(item.get("role") == "tool" for item in current_messages)
+        ):
             arrived[user].set()
             try:
                 await gates[user].wait()
             except asyncio.CancelledError:
                 cancelled.append(user)
                 raise
-        if not tools:
-            delta: dict[str, Any] = {"content": "Resource acceptance"}
+        delta: dict[str, Any]
+        arguments: dict[str, Any]
+        if router_request:
+            worker_report = "Worker reports for automatic continuation:" in user_text
+            dispatched = None if worker_report else next(
+                (
+                    item for item in current_messages
+                    if item.get("role") == "tool"
+                    and (
+                        item.get("name") == "dispatch_worker"
+                        or item.get("tool_call_id") == f"dispatch-{user}"
+                    )
+                ),
+                None,
+            )
+            if worker_report:
+                tool = "finish"
+                arguments = {"response": f"{user} finished"}
+                call_id = f"finish-report-{user}"
+            elif dispatched is None:
+                tool = "dispatch_worker"
+                arguments = {
+                    "task_id": f"settings-{user}",
+                    "task": f"Use the MCP echo tool for {user} and report its result.",
+                    "context": [],
+                }
+                call_id = f"dispatch-{user}"
+            else:
+                tool = "finish"
+                arguments = {"response": f"{user} finished"}
+                call_id = f"finish-{user}"
+            delta = {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": tool, "arguments": json.dumps(arguments)},
+                }]
+            }
+            finish = "tool_calls"
+        elif (
+            not tools
+            and len(messages) == 1
+            and messages[0].get("role") == "system"
+            and "### User input" in str(messages[0].get("content", ""))
+        ):
+            delta = {
+                "content": (
+                    '{"action":"replace","task_goal":"answer the input",'
+                    '"completion_boundary":"return one answer"}'
+                )
+            }
             finish = "stop"
-        elif any(item.get("tool_call_id") == "resource-call" for item in current_messages):
+        elif not tools:
+            delta = {"content": "Resource acceptance"}
+            finish = "stop"
+        elif any(
+            item.get("role") == "tool"
+            and (
+                (
+                    isinstance(item.get("name"), str)
+                    and item["name"].endswith("echo")
+                )
+                or item.get("tool_call_id") == "resource-call"
+            )
+            for item in current_messages
+        ):
             delta = {"content": f"{user} finished"}
             finish = "stop"
         else:
@@ -184,7 +261,7 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
         try:
             await asyncio.wait_for(arrived["scheduled-old"].wait(), 10)
         except TimeoutError:
-            pytest.fail(f"Schedule did not reach provider: {model_calls}")
+            pytest.fail("The scheduled Worker did not reach the Model provider within 10 seconds.")
         revision = service.config_view()["revision"]
         browser = await service.register_client("web")
         headers = {
@@ -264,13 +341,22 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
                 assert saved["application"]["status"] == "next-run-required"
                 assert workspace.resources is old and old is not None and not workspace._closed
                 gates["foreground-old"].set()
-                assert "foreground-old finished" in await _client_output(cli)
+                foreground_output: list[str] = []
+                try:
+                    async with asyncio.timeout(5):
+                        while "foreground-old finished" not in foreground_output:
+                            foreground_output.extend(await _client_output(cli))
+                except TimeoutError:
+                    pytest.fail("The foreground Worker report was not completed within 5 seconds.")
                 assert workspace.resources is old and not workspace._closed
                 assert (
                     cast(dict[str, Any], service.config_view()["application"])["status"]
-                    == "next-run-required"
+                    == "active"
                 )
-                assert not any(version == "new" for version, _, _ in header_calls)
+                assert not any(
+                    version == "new" and method == "tools/call"
+                    for version, method, _ in header_calls
+                )
                 gates["scheduled-old"].set()
                 assert workspace.resources is old and not workspace._closed
                 async with asyncio.timeout(10):
@@ -312,7 +398,13 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
                 observed.append(await conflict.text())
                 assert conflict.status == 409
         await cli.submit_user_input("foreground-new")
-        assert "foreground-new finished" in await _client_output(cli)
+        new_output: list[str] = []
+        try:
+            async with asyncio.timeout(5):
+                while "foreground-new finished" not in new_output:
+                    new_output.extend(await _client_output(cli))
+        except TimeoutError:
+            pytest.fail("The new foreground Worker report was not completed within 5 seconds.")
         new_job = ScheduleJob(
             job_id=str(uuid4()),
             message="scheduled-new",
@@ -333,16 +425,28 @@ async def test_model_and_http_mcp_save_preserves_foreground_schedule_and_existin
             ("foreground-new", "large-model"),
             ("scheduled-new", "large-model"),
         ):
+            # Workers retain their original Run configuration; report handling starts a new Router Run.
             calls = [item for item in model_calls if item["user"] == user and item["tools"]]
-            assert calls and all(item["model"] == model and item["key_matches"] for item in calls)
-            assert any(any(name.endswith("echo") for name in item["tools"]) for item in calls)
-            if model == "large-model":
-                assert all(
-                    item["max_output"] == 1536
-                    and item["temperature"] == 0.4
-                    and item["effort"] == "high"
-                    for item in calls
-                )
+            assert calls and all(item["key_matches"] for item in calls)
+            resource_calls = [
+                item for item in calls
+                if any(name.endswith("echo") for name in item["tools"])
+            ]
+            assert any(
+                item["model"] == model and "dispatch_worker" in item["tools"]
+                for item in calls
+            )
+            assert resource_calls and all(item["model"] == model for item in resource_calls)
+            if model == "small-model":
+                assert any(item["model"] == "large-model" for item in calls)
+            else:
+                assert all(item["model"] == model for item in calls)
+            assert all(
+                item["max_output"] == 1536
+                and item["temperature"] == 0.4
+                and item["effort"] == "high"
+                for item in calls if item["model"] == "large-model"
+            )
         assert sum(item["method"] == "tools/call" for item in wires["old"].requests) == 2
         assert sum(item["method"] == "initialize" for item in wires["old"].requests) == 1
         assert sum(item["method"] == "tools/call" for item in wires["new"].requests) == 2

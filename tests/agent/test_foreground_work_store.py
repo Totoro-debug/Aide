@@ -482,6 +482,7 @@ def test_legacy_question_state_upgrades_on_write_and_preserves_answer_retry(
     legacy.pop("deliveries", None)
     for question in legacy["questions"]:
         question.pop("owner_agent_id", None)
+        question.pop("revision", None)
     for task in legacy["tasks"]:
         task.pop("execution_role", None)
         if legacy_version < 3:
@@ -501,6 +502,7 @@ def test_legacy_question_state_upgrades_on_write_and_preserves_answer_retry(
     before = store.path.read_bytes()
     loaded = _store(tmp_path).load()
     assert store.path.read_bytes() == before
+    assert loaded.tasks[0].execution_role == "agent"
     question = loaded.question("question-1")
     assert question is not None and question.options == ()
     assert question.answer_kind == ("text" if answered else None)
@@ -510,7 +512,7 @@ def test_legacy_question_state_upgrades_on_write_and_preserves_answer_retry(
     if answered:
         assert accepted.revision == loaded.revision
     store.begin_resume("question-1", "execution-2")
-    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 7
+    assert json.loads(store.path.read_text(encoding="utf-8"))["schema_version"] == 8
     reloaded = _store(tmp_path).load().question("question-1")
     assert reloaded is not None and reloaded.answer == "reports"
     assert reloaded.answer_kind == "text"

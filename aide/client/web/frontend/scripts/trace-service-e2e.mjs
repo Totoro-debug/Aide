@@ -31,20 +31,37 @@ try {
       return (await response.json()).items;
     }, { sessionId: execution.session_id, token: credential });
   }
-  await expect.poll(async () => (await records()).filter(record => record.kind === "tool").length,
-    { timeout: 30000 }).toBe(2);
+  await expect.poll(async () => (await records())
+    .filter(record => record.kind === "tool")
+    .map(record => record.tool_name)
+    .sort(), { timeout: 30000 }).toEqual([
+    "dispatch_worker", "finish", "finish", "read_file", "read_file",
+  ]);
   await expect.poll(async () => (await records()).filter(record => record.kind === "model"
-    && record.purpose === "agent_run").length, { timeout: 30000 }).toBe(3);
+    && record.purpose === "agent_run").length, { timeout: 30000 }).toBe(6);
   const persisted = await records();
-  const tool = persisted.find(record => record.kind === "tool");
+  const tools = persisted.filter(record => record.kind === "tool");
+  const tool = tools.find(record => record.tool_name === "read_file");
   const model = persisted.find(record => record.record_id === tool.parent_record_id);
+  const worker = persisted.find(record => record.agent_id === tool.agent_id && record.kind === "model");
+  const dispatch = tools.find(record => record.tool_name === "dispatch_worker");
+  const router = persisted.find(record => record.record_id === dispatch.parent_record_id);
   assert.ok(persisted.some(record => record.record_id === tool.parent_record_id));
   assert.equal(tool.tool_name, "read_file");
+  assert.equal(tools.filter(record => record.tool_name === "dispatch_worker").length, 1);
+  assert.equal(tools.filter(record => record.agent_id === null
+    && !["dispatch_worker", "finish", "ask_user"].includes(record.tool_name)).length, 0);
+  assert.ok(worker);
+  assert.ok(router);
+  assert.equal(dispatch.root_id, router.root_id);
+  assert.equal(worker.agent_id, tool.agent_id);
+  assert.equal(worker.parent_root_id, router.root_id);
   assert.equal(model.capture_state, "complete");
   const before = await control.command("trace-claim");
   const url = `${control.details.url}/traces/sessions/${model.workspace_key}/${execution.session_id}`;
   await page.goto(`${url}?recordId=${model.record_id}`);
   await expect(page.getByRole("heading", { name: "Execution Trace", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: `Worker ${worker.agent_id}`, exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "small-model", exact: true })).toBeVisible();
   await page.getByRole("link", { name: /read_file · Succeeded/ }).click();
   await expect(page.getByRole("heading", { name: "read_file", exact: true })).toBeVisible();

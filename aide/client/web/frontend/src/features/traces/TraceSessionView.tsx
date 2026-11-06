@@ -321,6 +321,7 @@ export function TraceSessionView({ authState }: TraceSessionViewProps) {
 interface TraceRunGroup {
   rootId: string;
   runId: string | null;
+  origin: TraceRecordDTO["origin"];
   parentRootId: string | null;
   agentId: string | null;
   records: TraceRecordDTO[];
@@ -335,6 +336,7 @@ function groupTraceRecords(records: TraceRecordDTO[]): TraceRunGroup[] {
       group = {
         rootId: record.root_id,
         runId: record.run_id,
+        origin: record.origin,
         parentRootId: record.parent_root_id,
         agentId: record.agent_id,
         records: [],
@@ -375,7 +377,9 @@ function RecordGroup({
   depth: number;
 }) {
   const title = group.agentId !== null
-    ? t("traces.subagentGroup", { agent: group.agentId })
+    ? group.origin === "subagent"
+      ? t("traces.subagentGroup", { agent: group.agentId })
+      : t("traces.workerGroup", { worker: group.agentId })
     : group.runId !== null
       ? t("traces.runGroup", { run: group.runId })
       : t("traces.rootGroup", { root: group.rootId });

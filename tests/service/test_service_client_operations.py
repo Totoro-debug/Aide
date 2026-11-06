@@ -12,9 +12,17 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
+from aide.agent.tools.tool_gateway import ModelToolCall
 from aide.client.cli.conversation import TerminalConversationApp
 from aide.client.cli.ui.input import _ConversationInput
 from aide.config.config import ConfigLoader
+from aide.provider.models import (
+    AssistantModelMessage,
+    ModelCompleted,
+    ModelResponse,
+    ModelUsage,
+    TextDelta,
+)
 from aide.service.client import ServiceStartupError
 from aide.service.discovery import ServiceDiscovery, create_credential, write_discovery
 from aide.service.errors import ServiceError
@@ -211,9 +219,29 @@ async def test_textual_recovers_active_run_and_keeps_unsent_draft(
 
     def blocked_stream(provider: _ConcurrentProvider, **kwargs: Any) -> Any:
         async def emit() -> AsyncIterator[Any]:
-            if not str(kwargs["messages"][0].get("content", "")).startswith("Generate a concise title"):
+            messages = kwargs["messages"]
+            is_title = str(messages[0].get("content", "")).startswith("Generate a concise title")
+            tool_names = {
+                tool["function"]["name"]
+                for tool in kwargs["tools"]
+                if isinstance(tool.get("function"), dict)
+            }
+            if not is_title:
                 started.set()
                 await release.wait()
+            if "finish" in tool_names:
+                yield TextDelta("answer from session B")
+                call = ModelToolCall(
+                    "recovery-finish",
+                    "finish",
+                    '{"response":"answer from session B"}',
+                )
+                yield ModelCompleted(ModelResponse(
+                    AssistantModelMessage("", (call,)),
+                    ModelUsage(4, 1, 5),
+                    "tool_calls",
+                ))
+                return
             async for event in original_stream(provider, **kwargs):
                 yield event
         return emit()

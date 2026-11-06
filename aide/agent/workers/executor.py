@@ -140,12 +140,17 @@ class WorkerRunnerExecutor:
                 )
             )
 
+        subagents_available = self._subagent_coordinator is not None
         allowed_names = tuple(
             tool.name
             for tool in self._tool_gateway.catalog
-            if self._subagent_coordinator is not None or tool.name not in _SUBAGENT_TOOL_NAMES
+            if subagents_available or tool.name not in _SUBAGENT_TOOL_NAMES
         )
-        if self._subagent_coordinator is not None:
+        if subagents_available:
+            assert self._subagent_coordinator is not None
+            creator_tool_names = (*allowed_names, "tool_search")
+            if not self._schedule_session:
+                creator_tool_names = (*creator_tool_names, "ask_user")
             source = SubAgentSource(
                 kind=SubAgentSourceKind.WORKER,
                 restore_run_token=worker.restore_run_token,
@@ -159,7 +164,7 @@ class WorkerRunnerExecutor:
                 reasoning_effort=worker.model_configuration.reasoning_effort,
                 permission_level=worker.permission_level,
                 shell=worker.exec_shell_selector,
-                tool_names=tuple(dict.fromkeys((*allowed_names, "tool_search"))),
+                tool_names=tuple(dict.fromkeys(creator_tool_names)),
                 system_prompt=worker.system_prompt,
             )
             subagent_context = SubAgentToolContext(
@@ -185,7 +190,7 @@ class WorkerRunnerExecutor:
         gateway = build_agent_run_gateway(
             self._tool_gateway,
             excluded_names=(
-                () if self._subagent_coordinator is not None else _SUBAGENT_TOOL_NAMES
+                () if subagents_available else _SUBAGENT_TOOL_NAMES
             ),
             allowed_names=(*allowed_names, "tool_search"),
             mcp_keywords=self._mcp_keywords,
@@ -409,7 +414,9 @@ class WorkerRunnerExecutor:
             restore_run_token=None if self._schedule_session else worker.restore_run_token,
             schedule_run_id=worker.parent_task_id if self._schedule_session else None,
             agent_id=worker.worker_id,
-            parent_root_id=None if parent is None else parent.context.root_id,
+            parent_root_id=worker.trace_parent_root_id or (
+                None if parent is None else parent.context.root_id
+            ),
         )
         return trace_scope(self._trace_recorder, source)
 

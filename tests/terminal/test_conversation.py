@@ -963,6 +963,7 @@ async def _run_cli_terminal_case(
     monkeypatch: pytest.MonkeyPatch,
     scenario: Callable[[TerminalConversationApp, Pilot[None]], Awaitable[None]],
     provider: _FixedCatalogProvider | None = None,
+    provider_framing: bool = False,
     size: tuple[int, int] = (80, 24),
 ) -> None:
     home = AgentHome(agent_home)
@@ -974,7 +975,16 @@ async def _run_cli_terminal_case(
 
     class DeterministicExecutor(ProductionExecutor):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            kwargs["model_router"] = TaskFramingRouterAdapter(kwargs["model_router"])
+            frame = _response(
+                content=(
+                    '{"action":"replace","task_goal":"answer the user request",'
+                    '"completion_boundary":"return one final response"}'
+                )
+            )
+            kwargs["model_router"] = TaskFramingRouterAdapter(
+                kwargs["model_router"],
+                outcomes=None if provider_framing else (frame,) * 32,
+            )
             super().__init__(*args, **kwargs)
 
     class ScenarioApp(TerminalConversationApp):

@@ -856,33 +856,118 @@ async def test_http_reload_preserves_active_run_snapshot_resources_and_next_run_
     release = asyncio.Event()
     original_stream = case.provider.stream
     closed: list[bool] = []
+    blocked_old_worker = False
 
     async def close() -> None:
         closed.append(True)
 
     def stream(**kwargs: Any) -> AsyncIterator[ModelStreamEvent]:
+        nonlocal blocked_old_worker
         messages = kwargs["messages"]
         if str(messages[0].get("content", "")).startswith("Generate a concise title"):
             return original_stream(**kwargs)
         requests.append(deepcopy(list(messages)))
-        first = len(requests) == 1
+        tools = kwargs["tools"]
+        tool_names = {
+            name
+            for item in tools
+            if isinstance(item.get("function"), dict)
+            and isinstance((name := item["function"].get("name")), str)
+        }
+        user_index = max(
+            (index for index, item in enumerate(messages) if item.get("role") == "user"),
+            default=-1,
+        )
+        latest_user = str(messages[user_index].get("content", "")) if user_index >= 0 else ""
+        tool_results = [
+            item for item in messages[user_index + 1 :]
+            if item.get("role") == "tool"
+        ]
+        router_request = {"dispatch_worker", "finish"} <= tool_names
+        worker_request = str(messages[0].get("content", "")).startswith("You are an Aide Worker.")
 
-        async def emit() -> AsyncIterator[ModelStreamEvent]:
-            if first:
-                started.set()
-                await release.wait()
+        def scripted(
+            content: str = "", tool_call: ModelToolCall | None = None
+        ) -> AsyncIterator[ModelStreamEvent]:
+            async def emit_scripted() -> AsyncIterator[ModelStreamEvent]:
+                yield ModelCompleted(
+                    _response(
+                        content,
+                        tool_calls=() if tool_call is None else (tool_call,),
+                    )
+                )
+
+            return emit_scripted()
+
+        if router_request:
+            if "Worker reports for automatic continuation:" in latest_user:
+                report = next(
+                    (line.removeprefix("Report: ") for line in latest_user.splitlines()
+                     if line.startswith("Report: ")),
+                    "snapshot run completed",
+                )
+                return scripted(
+                    tool_call=ModelToolCall(
+                        "runtime-finish-report", "finish", json.dumps({"response": report})
+                    )
+                )
+            dispatch = next(
+                (item for item in tool_results if item.get("name") == "dispatch_worker"),
+                None,
+            )
+            if dispatch is None:
+                task = latest_user.rsplit("## User Input\n\n", 1)[-1]
+                return scripted(
+                    tool_call=ModelToolCall(
+                        "runtime-dispatch",
+                        "dispatch_worker",
+                        json.dumps({"task_id": f"runtime-{uuid4()}", "task": task, "context": []}),
+                    )
+                )
+            try:
+                summary = json.loads(str(dispatch.get("content", "{}"))).get("summary")
+            except (TypeError, json.JSONDecodeError):
+                summary = None
+            return scripted(
+                tool_call=ModelToolCall(
+                    "runtime-finish",
+                    "finish",
+                    json.dumps({
+                        "response": summary if isinstance(summary, str) else "snapshot run completed"
+                    }),
+                )
+            )
+
+        if worker_request:
+            read_result = next(
+                (item for item in tool_results if item.get("tool_call_id") == "read-resource"),
+                None,
+            )
+            if "first request" not in latest_user or read_result is not None:
+                return scripted("snapshot run completed")
+            if "read_file" not in tool_names:
+                return scripted(tool_call=ModelToolCall(
+                    "runtime-search-read", "tool_search", '{"query":"read file"}'
+                ))
+
+            async def read_old_snapshot() -> AsyncIterator[ModelStreamEvent]:
+                nonlocal blocked_old_worker
+                if not blocked_old_worker:
+                    blocked_old_worker = True
+                    started.set()
+                    await release.wait()
                 yield ModelCompleted(
                     _response(
                         "",
-                        tool_calls=(
-                            ModelToolCall("read-resource", "read_file", '{"path":"fixture.txt"}'),
-                        ),
+                        tool_calls=(ModelToolCall(
+                            "read-resource", "read_file", '{"path":"fixture.txt"}'
+                        ),),
                     )
                 )
-            else:
-                yield ModelCompleted(_response("snapshot run completed"))
 
-        return emit()
+            return read_old_snapshot()
+
+        return scripted("snapshot run completed")
 
     monkeypatch.setattr(case.provider, "stream", stream)
     monkeypatch.setattr(case.provider, "close", close)
@@ -943,13 +1028,68 @@ async def test_http_reload_preserves_active_run_snapshot_resources_and_next_run_
         finally:
             release.set()
         await asyncio.wait_for(sink.wait_for("run.completed", "old-snapshot"), timeout=3)
-        assert len(requests) == 2
-        for request in requests:
-            assert '"name":"planner"' in str(request[0]["content"])
-            assert '"name":"reviewer"' not in str(request[0]["content"])
+        old_workers = case.workspace.worker_store(case.other_claim.session_id).load().workers
+        old_task_ids = {
+            worker.parent_task_id
+            for worker in old_workers
+            if "first request" in worker.task
+        }
+        work_store = case.workspace.foreground_work_store(case.other_claim.session_id)
+        async with asyncio.timeout(3):
+            while not any(
+                task.task_id in old_task_ids and task.state == "completed"
+                for task in work_store.load().tasks
+            ):
+                await asyncio.sleep(0)
+        old_requests = [request for request in requests if "first request" in json.dumps(request)]
+        assert old_requests
+        old_worker_requests = [
+            request for request in old_requests
+            if str(request[0].get("content", "")).startswith("You are an Aide Worker.")
+        ]
+        assert old_worker_requests
+        for request in old_worker_requests:
+            request_content = "\n".join(str(message.get("content", "")) for message in request)
+            assert '"name":"planner"' in request_content
+            assert '"name":"reviewer"' not in request_content
             assert "OLD_SKILL_BODY" in json.dumps(request)
             assert "NEW_SKILL_BODY" not in json.dumps(request)
-        assert "resource survived" in json.dumps(requests[1])
+        assert any("resource survived" in json.dumps(request) for request in old_worker_requests), {
+            "requests": [
+                {
+                    "system": str(request[0].get("content", ""))[:90] if request else "",
+                    "users": [
+                        str(message.get("content", ""))[:240]
+                        for message in request if message.get("role") == "user"
+                    ],
+                    "tools": [
+                        {"name": message.get("name"),
+                         "tool_call_id": message.get("tool_call_id"),
+                         "content": str(message.get("content", ""))[:240]}
+                        for message in request if message.get("role") == "tool"
+                    ],
+                }
+                for request in old_requests
+            ],
+            "workers": [
+                {
+                    "state": worker.state,
+                    "task": worker.task,
+                    "conversation": [
+                        {
+                            "role": message.get("role"),
+                            "name": message.get("name"),
+                            "tool_call_id": message.get("tool_call_id"),
+                            "content": str(message.get("content", ""))[:300],
+                        }
+                        for message in worker.conversation
+                    ],
+                }
+                for worker in case.workspace.worker_store(
+                    case.other_claim.session_id
+                ).load().workers
+            ],
+        }
         await case.workspace.input(
             case.second.client_id,
             case.other_claim.session_id,
@@ -958,10 +1098,18 @@ async def test_http_reload_preserves_active_run_snapshot_resources_and_next_run_
             "new-snapshot",
         )
         await asyncio.wait_for(sink.wait_for("run.completed", "new-snapshot"), timeout=3)
-        assert len(requests) == 3
-        assert '"name":"reviewer"' in str(requests[2][0]["content"])
-        assert '"name":"planner"' not in str(requests[2][0]["content"])
-        assert "NEW_SKILL_BODY" in str(requests[2][-1]["content"])
+        new_requests = [request for request in requests if "next request" in json.dumps(request)]
+        assert new_requests
+        assert any(
+            '"name":"reviewer"' in "\n".join(
+                str(message.get("content", "")) for message in request
+            )
+            and '"name":"planner"' not in "\n".join(
+                str(message.get("content", "")) for message in request
+            )
+            and "NEW_SKILL_BODY" in json.dumps(request)
+            for request in new_requests
+        )
         assert closed == []
 
 

@@ -858,7 +858,14 @@ class WorkspaceRecord:
         ):
             return True
         return any(
-            record.source.kind is SubAgentSourceKind.FOREGROUND
+            record.source.kind in {
+                SubAgentSourceKind.FOREGROUND,
+                SubAgentSourceKind.WORKER,
+            }
+            and (
+                record.source.kind is SubAgentSourceKind.FOREGROUND
+                or "ask_user" in record.creator_snapshot.tool_names
+            )
             and record.source.task_id is not None
             and record.source.task_generation is not None
             and task_states.get((record.source.task_id, record.source.task_generation))
@@ -1010,7 +1017,7 @@ class WorkspaceRecord:
                     "answer": question.answer,
                     "answer_kind": question.answer_kind,
                     "answer_option_id": question.answer_option_id,
-                    "revision": foreground_work.revision,
+                    "revision": question.revision,
                 }
                 for question in foreground_work.questions
                 if question.state in {"pending", "answer_received", "interrupted"}
@@ -2309,7 +2316,10 @@ class WorkspaceRecord:
             )
         record_by_id = {record.agent_id: record for record in records}
         interrupted_children = tuple(record for record in records
-            if record.source.kind is SubAgentSourceKind.FOREGROUND
+            if record.source.kind in {
+                SubAgentSourceKind.FOREGROUND,
+                SubAgentSourceKind.WORKER,
+            }
             and record.source.task_id == task_id
             and record.source.task_generation == task.generation
             and record.status is SubAgentStatus.INTERRUPTED)
@@ -2671,9 +2681,12 @@ class WorkspaceRecord:
                     if state.processor_task is current:
                         state.processor_task = None
                     return
-                if await state.bus.inbound_snapshot():
+                queued_inputs = await state.bus.inbound_snapshot()
+                if queued_inputs:
                     inbound = await state.bus.get_inbound()
-                else:
+                elif not state.schedule:
+                    inbound = self._claim_automatic_worker_result(state)
+                if inbound is None:
                     inbound = self._claim_automatic_subagent_result(state)
                     if inbound is None:
                         inbound = self._claim_automatic_worker_result(state)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from uuid import uuid4
 
@@ -37,7 +38,12 @@ def _create_store(tmp_path: Path) -> tuple[WorkerStore, str]:
     return store, session.session_id
 
 
-def _create_worker(store: WorkerStore, *, task_id: str = "worker-task") -> WorkerRecord:
+def _create_worker(
+    store: WorkerStore,
+    *,
+    task_id: str = "worker-task",
+    trace_parent_root_id: str | None = None,
+) -> WorkerRecord:
     return store.create(
         parent_task_id=str(uuid4()),
         parent_generation=1,
@@ -52,7 +58,27 @@ def _create_worker(store: WorkerStore, *, task_id: str = "worker-task") -> Worke
         system_prompt="Worker system prompt",
         initial_message="Task: Inspect the release notes\nContext: Compare the latest two entries",
         restore_run_token=str(uuid4()),
+        trace_parent_root_id=trace_parent_root_id,
     )
+
+
+def test_worker_trace_parent_survives_reload_and_legacy_records_remain_readable(
+    tmp_path: Path,
+) -> None:
+    store, session_id = _create_store(tmp_path)
+    parent_root_id = str(uuid4())
+    worker = _create_worker(store, trace_parent_root_id=parent_root_id)
+
+    reloaded = WorkerStore(store.workspace_state, session_id).get(worker.worker_id)
+    assert reloaded is not None
+    assert reloaded.trace_parent_root_id == parent_root_id
+
+    legacy = json.loads(store.path.read_text(encoding="utf-8"))
+    del legacy["workers"][0]["trace_parent_root_id"]
+    store.path.write_text(json.dumps(legacy), encoding="utf-8")
+    reloaded_legacy = WorkerStore(store.workspace_state, session_id).get(worker.worker_id)
+    assert reloaded_legacy is not None
+    assert reloaded_legacy.trace_parent_root_id is None
 
 
 def test_worker_state_context_and_report_survive_store_recreation(tmp_path: Path) -> None:

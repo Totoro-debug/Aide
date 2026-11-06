@@ -302,8 +302,14 @@ class SubAgentRecord:
             if self.started_at is None or self.finished_at is not None:
                 raise ValueError("running SubAgent requires only a start timestamp")
         elif self.status is SubAgentStatus.WAITING_FOR_ANSWER:
-            if self.source.kind is not SubAgentSourceKind.FOREGROUND:
-                raise ValueError("only foreground SubAgents may wait for an answer")
+            if (
+                self.source.kind not in {
+                    SubAgentSourceKind.FOREGROUND,
+                    SubAgentSourceKind.WORKER,
+                }
+                or "ask_user" not in self.creator_snapshot.tool_names
+            ):
+                raise ValueError("only foreground-authorized SubAgents may wait for an answer")
             if self.started_at is None or self.finished_at is not None:
                 raise ValueError("waiting SubAgent requires only a start timestamp")
             if self.result is not None or self.error is not None:

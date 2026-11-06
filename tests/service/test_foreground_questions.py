@@ -257,6 +257,8 @@ def _legacy_agent_question(
     store.publish_question(question_id, committed_tool_call_ids={"question-call"})
     legacy = json.loads(store.path.read_text(encoding="utf-8"))
     legacy["schema_version"] = 6
+    for question in legacy["questions"]:
+        question.pop("revision", None)
     for task in legacy["tasks"]:
         task.pop("execution_role", None)
     store.path.write_text(json.dumps(legacy), encoding="utf-8")
@@ -362,8 +364,8 @@ async def test_router_answer_keeps_restricted_catalog_and_rejects_business_calls
                 return worker_report()
             user = next((m.get("content", "") for m in reversed(messages)
                          if m.get("role") == "user"), "")
-            worker_report = "worker reports for automatic continuation" in user.lower()
-            continuing = "Continue the current foreground task." in user or worker_report
+            has_worker_report = "worker reports for automatic continuation" in user.lower()
+            continuing = "Continue the current foreground task." in user or has_worker_report
             if "router-answer" not in user and not continuing:
                 return super().stream(**kwargs)
             self.router_tool_catalogs.append(tuple(
@@ -372,7 +374,7 @@ async def test_router_answer_keeps_restricted_catalog_and_rejects_business_calls
             ))
 
             async def emit() -> AsyncIterator[ModelStreamEvent]:
-                if worker_report:
+                if has_worker_report:
                     response = ModelResponse(
                         message=AssistantModelMessage(
                             content="",

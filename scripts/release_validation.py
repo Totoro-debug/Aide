@@ -78,19 +78,6 @@ COLLECTION_PATHS: Final[tuple[str, ...]] = (
     "tests/sessions/test_session.py::test_persist_writes_one_complete_compact_utf8_snapshot_atomically",
 )
 
-TARGETED_TEST_PATHS: Final[tuple[str, ...]] = (
-    "tests/packaging/test_release_contract.py",
-    "tests/configuration",
-    "tests/tools",
-    "tests/agent",
-    "tests/restore",
-    "tests/sessions",
-    "tests/scheduling",
-    "tests/management",
-    "tests/terminal",
-    "tests/architecture",
-)
-
 
 class ReleasePhase(StrEnum):
     """One independently runnable release validation phase."""
@@ -283,7 +270,7 @@ class _ReportRecorder:
         if error is not None:
             status = "blocked" if isinstance(error, ReleaseBlockedError) else "failed"
         report: dict[str, object] = {
-            "report_schema_version": 2,
+            "report_schema_version": 3,
             "phase": self.requested_phase,
             "status": status,
             "source": _source_identity(),
@@ -1288,7 +1275,16 @@ COVERAGE_RULES: Final[tuple[CoverageRule, ...]] = (
 
 def collect_pytest_nodes() -> tuple[str, ...]:
     """Collect the release-relevant pytest nodes without executing them."""
-    command = [sys.executable, "-m", "pytest", "--collect-only", "-q", *COLLECTION_PATHS]
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-n",
+        "0",
+        "--collect-only",
+        "-q",
+        *COLLECTION_PATHS,
+    ]
     result = _run_command(command, timeout=300)
     nodes: list[str] = []
     for line in result.stdout.splitlines():
@@ -1835,10 +1831,9 @@ def _run_quality(host_results: Sequence[Mapping[str, object]] | None = None) -> 
             return evidence
 
         try:
-            targeted = run_suite(TARGETED_TEST_PATHS, report_dir / "targeted.xml", "targeted")
             full = run_suite(("tests",), report_dir / "full.xml", "full")
             validated_skips = _validate_skips(
-                (*targeted.skips, *full.skips),
+                full.skips,
                 host_results=actual_hosts,
                 path_evidence=path_evidence,
                 passed_nodes=full.passed_nodes,
@@ -1885,7 +1880,6 @@ def _run_quality(host_results: Sequence[Mapping[str, object]] | None = None) -> 
         "host_integration": actual_hosts,
         "path_capability": path_evidence,
         "pytest": {
-            "targeted": targeted.to_dict(),
             "full": full.to_dict(),
             "validated_skips": validated_skips,
             "required_windows_alternatives": sorted(REQUIRED_WINDOWS_ALTERNATIVE_NODES),

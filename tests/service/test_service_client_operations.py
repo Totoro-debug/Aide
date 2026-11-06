@@ -138,7 +138,9 @@ async def test_client_recovers_connection_and_never_reuses_expired_claim(
     client.add_state_listener(lambda event: snapshots.append(event)
                               if event["type"] == "snapshot.required" else None)
     observer = await service.register_client("cli")
-    await service.connect_client(observer.client_id, _CollectingSink())
+    observer_sink = _CollectingSink()
+    await service.connect_client(observer.client_id, observer_sink)
+    stack.push_async_callback(service.disconnect_client, observer.client_id, sink=observer_sink)
     if recovery == "expired":
         service.reconnect_timeout = 0.05
     socket = client._socket
@@ -151,6 +153,7 @@ async def test_client_recovers_connection_and_never_reuses_expired_claim(
         await replacement.start()
         stack.push_async_callback(replacement.stop)
         server = await stack.enter_async_context(TestServer(create_app(replacement), host="127.0.0.1"))
+        stack.push_async_callback(client.close)
         create_credential(service.agent_home)
         assert server.port is not None
         write_discovery(service.agent_home, ServiceDiscovery(
@@ -534,7 +537,9 @@ async def test_textual_resume_then_recovery_preserves_draft_and_accepts_one_inpu
         input_area.text = "恢复前的草稿 with spaces\nand another line"
         draft = input_area.text
         observer = await service.register_client("cli")
-        await service.connect_client(observer.client_id, _CollectingSink())
+        observer_sink = _CollectingSink()
+        await service.connect_client(observer.client_id, observer_sink)
+        stack.push_async_callback(service.disconnect_client, observer.client_id, sink=observer_sink)
         service.reconnect_timeout = 0.05
         assert client._socket is not None
         await client._socket.close()
@@ -546,6 +551,7 @@ async def test_textual_resume_then_recovery_preserves_draft_and_accepts_one_inpu
             await active.start()
             stack.push_async_callback(active.stop)
             server = await stack.enter_async_context(TestServer(create_app(active), host="127.0.0.1"))
+            stack.push_async_callback(client.close)
             create_credential(active.agent_home)
             assert server.port is not None
             write_discovery(active.agent_home, ServiceDiscovery(
@@ -603,7 +609,9 @@ async def test_textual_recovery_refusal_offers_retry_and_new_session(
         await active.start()
         stack.push_async_callback(active.stop)
         owner = await active.register_client("cli")
-        await active.connect_client(owner.client_id, _CollectingSink())
+        owner_sink = _CollectingSink()
+        await active.connect_client(owner.client_id, owner_sink)
+        stack.push_async_callback(active.disconnect_client, owner.client_id, sink=owner_sink)
         context: dict[str, Any] = {}
         if refusal != "configuration":
             context = cast(dict[str, Any], await active.open_conversation(
@@ -627,6 +635,7 @@ async def test_textual_recovery_refusal_offers_retry_and_new_session(
 
         monkeypatch.setattr(active, "open_conversation", open_conversation)
         server = await stack.enter_async_context(TestServer(create_app(active), host="127.0.0.1"))
+        stack.push_async_callback(client.close)
         create_credential(active.agent_home)
         assert server.port is not None
         write_discovery(active.agent_home, ServiceDiscovery(
@@ -677,7 +686,9 @@ async def test_pending_recovery_is_cancelled_or_discards_the_old_response(
     original_client = client.client_id
     target = client.session_id
     observer = await service.register_client("cli")
-    await service.connect_client(observer.client_id, _CollectingSink())
+    observer_sink = _CollectingSink()
+    await service.connect_client(observer.client_id, observer_sink)
+    stack.push_async_callback(service.disconnect_client, observer.client_id, sink=observer_sink)
     service.reconnect_timeout = 0.05
     arrived, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
     original = client._http_request
@@ -712,6 +723,7 @@ async def test_pending_recovery_is_cancelled_or_discards_the_old_response(
     await replacement.start()
     stack.push_async_callback(replacement.stop)
     server = await stack.enter_async_context(TestServer(create_app(replacement), host="127.0.0.1"))
+    stack.push_async_callback(client.close)
     create_credential(service.agent_home)
     assert server.port is not None
     write_discovery(service.agent_home, ServiceDiscovery(

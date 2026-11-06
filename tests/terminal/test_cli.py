@@ -397,6 +397,7 @@ def test_installed_aide_console_entry_starts() -> None:
     assert "Aide Personal Agent" in result.stdout
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_aide_generates_missing_configuration_and_stops(
     agent_home: Path,
     workspace: Path,
@@ -414,6 +415,7 @@ def test_installed_aide_generates_missing_configuration_and_stops(
     assert not (agent_home / "logs").exists()
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_aide_preserves_unrelated_log_data(
     agent_home: Path,
     workspace: Path,
@@ -434,6 +436,7 @@ def test_installed_aide_preserves_unrelated_log_data(
     assert unrelated_log_snapshot(agent_home) == before
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_config_command_generates_and_displays_missing_configuration(
     agent_home: Path,
     workspace: Path,
@@ -450,6 +453,7 @@ def test_installed_config_command_generates_and_displays_missing_configuration(
     assert not (workspace / ".aide").exists()
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_config_command_redacts_valid_configuration(
     agent_home: Path,
     workspace: Path,
@@ -467,6 +471,7 @@ def test_installed_config_command_redacts_valid_configuration(
     assert not (workspace / ".aide").exists()
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_config_command_reports_mcp_diagnostics_without_secrets(
     agent_home: Path,
     workspace: Path,
@@ -502,6 +507,7 @@ headers = { Authorization = "Bearer installed-header-secret" }
     assert not (workspace / ".aide").exists()
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_config_command_keeps_fallback_diagnostic_before_later_fatal_error(
     agent_home: Path,
     workspace: Path,
@@ -526,6 +532,7 @@ def test_installed_config_command_keeps_fallback_diagnostic_before_later_fatal_e
     assert "level-secret" not in result.stdout[: result.stdout.index(path)] + result.stderr
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_config_command_shows_safe_malformed_configuration(
     agent_home: Path,
     workspace: Path,
@@ -549,6 +556,7 @@ def test_installed_config_command_shows_safe_malformed_configuration(
     assert not (workspace / ".aide").exists()
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_config_command_hides_invalid_utf8_and_traceback(
     agent_home: Path,
     workspace: Path,
@@ -567,6 +575,7 @@ def test_installed_config_command_hides_invalid_utf8_and_traceback(
     assert "Traceback" not in visible
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_config_command_ignores_undefined_content_fields(
     agent_home: Path,
     workspace: Path,
@@ -588,6 +597,7 @@ def test_installed_config_command_ignores_undefined_content_fields(
     assert not (workspace / ".aide").exists()
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_aide_rejects_valid_configuration_without_a_tty(
     agent_home: Path,
     workspace: Path,
@@ -605,6 +615,7 @@ def test_installed_aide_rejects_valid_configuration_without_a_tty(
     assert not (workspace / ".aide").exists()
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_aide_uses_service_configuration_eligibility(
     agent_home: Path,
     workspace: Path,
@@ -651,6 +662,7 @@ def test_installed_aide_uses_service_configuration_eligibility(
     assert not (agent_home / "logs").exists()
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_aide_rejects_non_tty_before_unsafe_workspace_state(
     agent_home: Path,
     workspace: Path,
@@ -673,6 +685,7 @@ def test_installed_aide_rejects_non_tty_before_unsafe_workspace_state(
     assert not (agent_home / "logs").exists()
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_aide_rejects_non_tty_before_corrupt_schedule_state(
     agent_home: Path,
     workspace: Path,
@@ -697,6 +710,7 @@ def test_installed_aide_rejects_non_tty_before_corrupt_schedule_state(
     assert not (state_path / "logs").exists()
 
 
+@pytest.mark.xdist_group("real_service_process")
 def test_installed_aide_rejects_non_tty_before_user_home_workspace_validation(
     agent_home: Path,
 ) -> None:

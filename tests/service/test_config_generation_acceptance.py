@@ -532,6 +532,9 @@ async def test_http_save_preserves_foreground_schedule_confirmation_and_admissio
         await wait_for_assistant_response("answer from queued input")
         await cli.submit_user_input("session-b")
         await wait_for_assistant_response("answer from session B")
+        await workspace.require_claim(
+            cli.client_id, cli.session_id, cli.claim_version
+        ).loop.session.wait_for_pending_persist()
         assert len(providers) == 1
         persisted = Session.load(cast(Any, old_state), cli.session_id)
         assert any(

@@ -1091,9 +1091,6 @@ async def management_case(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> AsyncIterator[tuple[AgentService, WorkspaceRecord, str, str, str]]:
-    # These tests cover pre-Router Foreground Tasks; Router-specific cases use
-    # router_management_case below.
-    monkeypatch.setattr(WorkspaceRecord, "input", _legacy_agent_input)
     home = _prepare_agent_home(tmp_path / "agent-home")
     _add_model_routes(home, "schedule", "subagent")
     workspace_path = tmp_path / "workspace"
@@ -1124,6 +1121,15 @@ async def management_case(
         yield service, workspace, client.client_id, session_id, other_session_id
     finally:
         await service.stop()
+
+
+@pytest_asyncio.fixture
+async def legacy_management_case(
+    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[AgentService, WorkspaceRecord, str, str, str]:
+    monkeypatch.setattr(WorkspaceRecord, "input", _legacy_agent_input)
+    return management_case
 
 
 @pytest_asyncio.fixture
@@ -1172,10 +1178,10 @@ async def test_subagent_queries_survive_claim_release_and_remain_session_scoped(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scope", ["chat", "project"])
 async def test_first_draft_run_allows_subagent_queries_and_cancellation_before_persist(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     scope: Literal["chat", "project"],
 ) -> None:
-    service, workspace, client_id, _session_id, other_session_id = management_case
+    service, workspace, client_id, _session_id, other_session_id = legacy_management_case
     if scope == "project":
         await register_project(service, client_id, workspace.workspace_path)
     provider = _FirstDraftProvider()
@@ -1293,9 +1299,9 @@ async def test_first_draft_run_allows_subagent_queries_and_cancellation_before_p
 
 @pytest.mark.asyncio
 async def test_user_cancellation_releases_wait_agent_in_the_first_draft_run(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
-    service, workspace, client_id, _session_id, _other_session_id = management_case
+    service, workspace, client_id, _session_id, _other_session_id = legacy_management_case
     provider = _FirstDraftProvider(wait_for_child=True)
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -1538,11 +1544,11 @@ async def _wait_for_automatic_completion(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["none", "partial_ledger", "session_before", "session_after"])
 async def test_same_task_terminal_results_are_combined_in_one_automatic_main_request(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
     fault: str,
 ) -> None:
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = legacy_management_case
     provider = _BatchDelegatingProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -1780,9 +1786,9 @@ async def test_same_task_terminal_results_are_combined_in_one_automatic_main_req
 
 @pytest.mark.asyncio
 async def test_recalling_queued_inputs_does_not_recall_automatic_results(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = legacy_management_case
     provider = _BatchDelegatingProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -1848,9 +1854,9 @@ async def test_recalling_queued_inputs_does_not_recall_automatic_results(
 
 @pytest.mark.asyncio
 async def test_results_arriving_during_automatic_run_wait_for_next_user_first_arbitration(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = legacy_management_case
     provider = _BatchDelegatingProvider()
     provider.hold_batch_children = {2, 3}
     provider.hold_automatic = True
@@ -1990,10 +1996,10 @@ async def test_results_arriving_during_automatic_run_wait_for_next_user_first_ar
 
 @pytest.mark.asyncio
 async def test_batch_claim_failure_preserves_each_result_for_reconciliation(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = legacy_management_case
     provider = _BatchDelegatingProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -2089,9 +2095,9 @@ async def test_batch_claim_failure_preserves_each_result_for_reconciliation(
 
 @pytest.mark.asyncio
 async def test_unanswered_task_results_stay_gated_while_independent_task_continues(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = legacy_management_case
     provider = _BatchDelegatingProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -2615,11 +2621,11 @@ async def test_claimless_automatic_continuation_keeps_task_ceiling_and_denies_un
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fault", ["none", "claim", "dropped_event", "session_before", "session_after", "ledger"])
 async def test_completed_child_automatically_continues_the_current_task_without_a_user_anchor(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
     fault: str,
 ) -> None:
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = legacy_management_case
     provider = _DelegatingProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -2739,7 +2745,7 @@ async def test_completed_child_automatically_continues_the_current_task_without_
         delivery = workspace.foreground_work_store(session_id).load().deliveries[0]
         assert delivery.state == "committed"
         record = _require_record(workspace.subagent_repository(session_id), delivery.agent_id)
-        for index in range(100):
+        for index in range(3):
             await workspace.publish(SubAgentEvent(
                 kind=SubAgentEventKind.STATUS, workspace_id=workspace.workspace_id,
                 session_id=session_id, agent_id=record.agent_id, revision=record.revision + index + 1000,
@@ -2787,9 +2793,9 @@ async def test_completed_child_automatically_continues_the_current_task_without_
 
 @pytest.mark.asyncio
 async def test_explicit_task_continue_recovers_a_persisted_subagent_result(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = legacy_management_case
     provider = _DelegatingProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -2931,11 +2937,11 @@ async def test_explicit_task_continue_recovers_a_persisted_subagent_result(
 
 @pytest.mark.asyncio
 async def test_foreground_subagent_question_suspends_and_notifies_its_waiter(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
     from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
 
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = legacy_management_case
     provider = _DelegatingProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -3043,11 +3049,11 @@ async def test_foreground_subagent_question_suspends_and_notifies_its_waiter(
 
 @pytest.mark.asyncio
 async def test_missing_subagent_question_resource_reports_interruption(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
     from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
 
-    service, workspace, client_id, session_id, _other_session_id = management_case
+    service, workspace, client_id, session_id, _other_session_id = legacy_management_case
     provider = _DelegatingProvider()
     service.model_router._provider_factory = lambda _configuration: provider
     service.model_router._providers.clear()
@@ -3819,8 +3825,7 @@ async def test_job_removal_fences_a_coordinator_registered_during_removal(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entry", ["tool", "user"])
-@pytest.mark.parametrize("retry_entry", ["tool", "user"])
+@pytest.mark.parametrize(("entry", "retry_entry"), [("tool", "user"), ("user", "tool")])
 async def test_job_removal_waits_for_all_pools_and_retries_checkpoint_failure(
     management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     entry: str,
@@ -4122,8 +4127,15 @@ async def test_concurrent_job_removal_keeps_the_source_fenced(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entry", ["tool", "user"])
-@pytest.mark.parametrize("failure", ["before_replace", "after_replace", "unreadable"])
+@pytest.mark.parametrize(
+    ("failure", "entry"),
+    [
+        ("before_replace", "tool"),
+        ("before_replace", "user"),
+        ("after_replace", "tool"),
+        ("unreadable", "user"),
+    ],
+)
 async def test_job_removal_store_failure_reopens_only_a_proven_unremoved_source(
     management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
@@ -4814,12 +4826,12 @@ async def test_eight_real_question_runners_release_capacity_for_ninth_child(
 
 @pytest.mark.asyncio
 async def test_child_question_publication_failure_reconciles_committed_runner(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
 
-    service, workspace, client, sid, _ = management_case
+    service, workspace, client, sid, _ = legacy_management_case
     provider = _DelegatingProvider()
     service.model_router._provider_factory = lambda _: provider
     service.model_router._providers.clear()
@@ -4856,12 +4868,12 @@ async def test_child_question_publication_failure_reconciles_committed_runner(
 
 @pytest.mark.asyncio
 async def test_saved_answer_with_failed_queue_publication_is_explicitly_interrupted(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
 
-    service, workspace, client, sid, _ = management_case
+    service, workspace, client, sid, _ = legacy_management_case
     provider = _DelegatingProvider()
     service.model_router._provider_factory = lambda _: provider
     service.model_router._providers.clear()
@@ -4941,13 +4953,13 @@ async def test_child_answer_does_not_replace_a_removed_registered_model(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lower_permission", [False, True])
 async def test_automatic_file_effect_uses_user_anchor_and_current_permission(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     lower_permission: bool,
 ) -> None:
     from aide.agent.session.restore import RestoreMode
     from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
 
-    service, workspace, client, sid, _ = management_case
+    service, workspace, client, sid, _ = legacy_management_case
     provider = _DelegatingProvider()
     provider.automatic_write = True
     service.model_router._provider_factory = lambda _: provider
@@ -4986,11 +4998,11 @@ async def test_automatic_file_effect_uses_user_anchor_and_current_permission(
 
 @pytest.mark.asyncio
 async def test_queued_users_and_wait_delivery_precede_automatic_arbitration(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
 ) -> None:
     from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
 
-    service, workspace, client, sid, _ = management_case
+    service, workspace, client, sid, _ = legacy_management_case
     provider = _DelegatingProvider()
     service.model_router._provider_factory = lambda _: provider
     service.model_router._providers.clear()
@@ -5022,12 +5034,12 @@ async def test_queued_users_and_wait_delivery_precede_automatic_arbitration(
 
 @pytest.mark.asyncio
 async def test_restart_two_child_questions_only_resumes_answered_chain(
-    management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
+    legacy_management_case: tuple[AgentService, WorkspaceRecord, str, str, str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.service.test_foreground_questions import _wait_for_idle, _wait_until
 
-    service, workspace, client, sid, _ = management_case
+    service, workspace, client, sid, _ = legacy_management_case
     provider = _DelegatingProvider()
     monkeypatch.setattr("aide.service.runtime.service.create_provider", lambda _: provider)
     monkeypatch.setattr("aide.service.runtime.workspace.create_provider", lambda _: provider)

@@ -567,6 +567,7 @@ async def test_chat_history_skips_unavailable_workspace_without_recreating_it(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_path: Path) -> None:
     home = _prepare_agent_home(tmp_path / "agent-home")
     workspace = tmp_path / "workspace"
@@ -800,6 +801,7 @@ async def test_two_real_clients_use_one_service_and_claims_are_exclusive(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_project_http_contract_reports_path_errors_and_keeps_cli_workspaces_unregistered(
     tmp_path: Path,
 ) -> None:
@@ -902,6 +904,7 @@ async def test_project_http_contract_reports_path_errors_and_keeps_cli_workspace
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_project_http_delete_returns_operation_and_preserves_directory(
     tmp_path: Path,
 ) -> None:
@@ -988,6 +991,7 @@ async def test_project_http_delete_returns_operation_and_preserves_directory(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_project_session_http_scope_claim_and_empty_draft_contract(
     tmp_path: Path,
 ) -> None:
@@ -1238,6 +1242,7 @@ async def test_session_page_limit_preserves_optional_and_validation_contract(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_workspace_session_listing_filters_titles_and_pages_without_history(
     tmp_path: Path,
 ) -> None:
@@ -1356,6 +1361,7 @@ async def test_workspace_session_listing_filters_titles_and_pages_without_histor
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_workspace_session_rename_requires_claim_and_persists_metadata_version(
     tmp_path: Path,
 ) -> None:
@@ -1507,6 +1513,7 @@ async def test_workspace_session_rename_requires_claim_and_persists_metadata_ver
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_workspace_session_delete_requires_confirmation_and_cleans_only_session_data(
     tmp_path: Path,
 ) -> None:
@@ -1612,6 +1619,7 @@ async def test_workspace_session_delete_requires_confirmation_and_cleans_only_se
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_project_session_delete_returns_project_identity(
     tmp_path: Path,
 ) -> None:
@@ -1663,6 +1671,7 @@ async def test_project_session_delete_returns_project_identity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_session_delete_requires_the_current_client_claim(
     tmp_path: Path,
 ) -> None:
@@ -1753,6 +1762,7 @@ async def test_web_draft_stays_empty_when_workspace_has_startup_restore(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_two_processes_start_or_join_one_service(tmp_path: Path) -> None:
     home = _prepare_agent_home(tmp_path / "agent-home")
     workspace = tmp_path / "workspace"
@@ -1815,6 +1825,7 @@ asyncio.run(main())
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_cli_entry_binds_terminal_to_service_adapters(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1876,6 +1887,7 @@ async def test_cli_entry_binds_terminal_to_service_adapters(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_terminal_displays_session_projection_from_service(tmp_path: Path) -> None:
     home = _prepare_agent_home(tmp_path / "agent-home")
     workspace = tmp_path / "workspace"
@@ -1919,6 +1931,7 @@ async def test_terminal_displays_session_projection_from_service(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_startup_does_not_stop_an_unrelated_port_occupant(tmp_path: Path) -> None:
     home = _prepare_agent_home(tmp_path / "agent-home")
     workspace = tmp_path / "workspace"
@@ -1936,6 +1949,7 @@ async def test_startup_does_not_stop_an_unrelated_port_occupant(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_unrelated_listener_never_receives_service_credential(tmp_path: Path) -> None:
     home = _prepare_agent_home(tmp_path / "agent-home")
     workspace = tmp_path / "workspace"
@@ -1979,6 +1993,7 @@ async def test_service_without_first_client_exits_after_connection_window(tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["cli", "web"])
+@pytest.mark.xdist_group("real_service_process")
 async def test_last_real_client_disconnect_exits_service_process(
     tmp_path: Path, kind: str,
 ) -> None:
@@ -2053,6 +2068,7 @@ async def test_last_real_client_disconnect_exits_service_process(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_launcher_waits_for_draining_service_before_starting_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2107,6 +2123,7 @@ async def test_launcher_waits_for_draining_service_before_starting_replacement(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_cli_restore_refreshes_claim_and_conversation_projection(tmp_path: Path) -> None:
     home = _prepare_agent_home(tmp_path / "agent-home")
     workspace = tmp_path / "workspace"
@@ -2147,6 +2164,7 @@ async def test_cli_restore_refreshes_claim_and_conversation_projection(tmp_path:
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_browser_ticket_is_one_time_cookie_auth_and_static_routes_are_bounded(
     tmp_path: Path,
 ) -> None:

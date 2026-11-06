@@ -207,16 +207,17 @@ def test_quality_runs_complete_sequence_and_requires_platform_evidence(
             "file_symlink": {"available": True},
         },
     )
-    suites: list[str] = []
+    pytest_calls: list[tuple[tuple[str, ...], str]] = []
     commands: list[list[str]] = []
 
     def pytest_report(paths: object, xml_path: Path, label: str) -> PytestEvidence:
         del xml_path
-        suites.append(label)
+        selected_paths = tuple(cast(tuple[str, ...], paths))
+        pytest_calls.append((selected_paths, label))
         passed = REQUIRED_WINDOWS_ALTERNATIVE_NODES
         return PytestEvidence(
             label,
-            tuple(cast(tuple[str, ...], paths)),
+            selected_paths,
             10,
             10,
             tuple(passed) + tuple(RESTORE_PATH_MATRIX_NODES),
@@ -236,7 +237,15 @@ def test_quality_runs_complete_sequence_and_requires_platform_evidence(
     monkeypatch.setattr(release_validation, "_run_command", command)
     report = release_validation._run_quality(_host_evidence())
 
-    assert suites == ["targeted", "full"]
+    assert pytest_calls == [(("tests",), "full")]
+    pytest_result = cast(dict[str, object], report["pytest"])
+    assert set(pytest_result) == {
+        "full",
+        "validated_skips",
+        "required_windows_alternatives",
+        "required_restore_path_matrix",
+    }
+    assert cast(dict[str, object], pytest_result["full"])["paths"] == ["tests"]
     assert commands[:3] == [
         [sys.executable, "-m", "ruff", "check", "aide", "tests", "scripts"],
         ["git", "diff", "--check"],
@@ -250,6 +259,59 @@ def test_quality_runs_complete_sequence_and_requires_platform_evidence(
         "git_diff_check": "passed",
         "mypy": "passed",
     }
+
+
+def test_quality_report_preserves_full_suite_evidence_when_pytest_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(release_validation, "_platform", lambda: "windows")
+    monkeypatch.setattr(
+        release_validation,
+        "run_host_integration",
+        lambda _selectors: _host_evidence(),
+    )
+    monkeypatch.setattr(
+        release_validation,
+        "_windows_path_capability_evidence",
+        lambda: {"junction": {"available": True}},
+    )
+    error = RuntimeError("full suite failed")
+    calls: list[tuple[tuple[str, ...], str]] = []
+
+    def pytest_report(paths: object, xml_path: Path, label: str) -> PytestEvidence:
+        selected_paths = tuple(cast(tuple[str, ...], paths))
+        calls.append((selected_paths, label))
+        xml_path.write_text(
+            "<testsuite tests='2' failures='1' errors='0' skipped='0'>"
+            "<testcase classname='tests.example' name='test_passed'/>"
+            "<testcase classname='tests.example' name='test_failed'>"
+            "<failure message='assertion failed'/></testcase>"
+            "</testsuite>",
+            encoding="utf-8",
+        )
+        raise error
+
+    monkeypatch.setattr(release_validation, "_run_pytest_with_report", pytest_report)
+    recorder = release_validation._ReportRecorder("quality", "both")
+    token = release_validation._REPORT_CONTEXT.set(recorder)
+    try:
+        with pytest.raises(RuntimeError, match="full suite failed"):
+            release_validation._run_reported_phase(ReleasePhase.QUALITY, "both", recorder)
+    finally:
+        release_validation._REPORT_CONTEXT.reset(token)
+
+    report = recorder.build(payload=None, error=error)
+    pytest_result = cast(dict[str, object], report["pytest"])
+    assert calls == [(("tests",), "full")]
+    assert set(pytest_result) == {"full"}
+    full_evidence = cast(dict[str, object], pytest_result["full"])
+    assert full_evidence["total"] == 2
+    assert full_evidence["passed_nodes"] == ["tests/example.py::test_passed"]
+    assert full_evidence["failed_nodes"] == ["tests/example.py::test_failed"]
+    assert "validated_skips" not in pytest_result
+    execution = cast(dict[str, object], report["execution"])
+    phases = cast(dict[str, object], execution["phases"])
+    assert cast(dict[str, object], phases["quality"])["status"] == "failed"
 
 
 def test_skip_gate_fails_closed_for_missing_hosts_and_unknown_skips(
@@ -550,7 +612,7 @@ def test_release_failure_writes_partial_report_and_keeps_fail_fast_gate(
         == 1
     )
     report = json.loads(report_path.read_text(encoding="utf-8"))
-    assert report["report_schema_version"] == 2
+    assert report["report_schema_version"] == 3
     assert report["status"] == "blocked"
     assert report["source"] == {"head": "fixture-head", "dirty": True}
     assert report["coverage"]["collected_nodes"] == ["tests/example.py::test_case"]

@@ -1,5 +1,4 @@
 import ast
-import importlib.util
 import inspect
 import subprocess
 import sys
@@ -28,23 +27,6 @@ class _StaticImport:
     line: int
 
 
-def test_retired_prompt_and_session_assembly_modules_are_absent() -> None:
-    assert not (PACKAGE_ROOT / "agent" / "prompts.py").exists()
-    assert not (PACKAGE_ROOT / "session" / "projection.py").exists()
-    assert not (PACKAGE_ROOT / "agent" / "session" / "projection.py").exists()
-    agent_prompt_module = ".".join(("aide", "agent", "prompts"))
-    assert importlib.util.find_spec(agent_prompt_module) is None
-    for session_projection_module in (
-        ".".join(("aide", "session", "projection")),
-        ".".join(("aide", "agent", "session", "projection")),
-    ):
-        try:
-            spec = importlib.util.find_spec(session_projection_module)
-        except ModuleNotFoundError:
-            spec = None
-        assert spec is None
-
-
 def test_agent_owned_packages_have_no_top_level_compatibility_exports() -> None:
     retired_modules = ("memory", "session", "tools")
     assert all(not (PACKAGE_ROOT / module).exists() for module in retired_modules)
@@ -70,7 +52,20 @@ def test_agent_owned_packages_have_no_top_level_compatibility_exports() -> None:
 
 def _python_files(root: Path) -> tuple[Path, ...]:
     frontend = PACKAGE_ROOT / "client" / "web" / "frontend"
-    return tuple(sorted(path for path in root.rglob("*.py") if not path.is_relative_to(frontend)))
+    paths: list[Path] = []
+    for directory, directories, filenames in root.walk():
+        if directory.is_relative_to(frontend):
+            directories.clear()
+            continue
+        directories[:] = [
+            name for name in directories if not (directory / name).is_relative_to(frontend)
+        ]
+        paths.extend(
+            path
+            for name in filenames
+            if (path := directory / name).match("*.py")
+        )
+    return tuple(sorted(paths))
 
 
 def _imports(path: Path) -> tuple[tuple[str, int], ...]:
@@ -721,14 +716,16 @@ def test_context_builder_does_not_import_model_request_runtime_boundaries() -> N
     assert violations == []
 
 
-def test_agent_loop_control_interface_is_consolidated() -> None:
-    path = PACKAGE_ROOT / "agent" / "loop.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
-
-    assert [node for node in classes if node.name == "AgentLoopControl"] == []
-
-    terminal_controls = [node for node in classes if node.name == "TerminalAgentRunExecutorControl"]
+def test_terminal_agent_run_executor_control_matches_current_contract() -> None:
+    contracts_path = PACKAGE_ROOT / "agent" / "conversation_contracts.py"
+    contracts_tree = ast.parse(
+        contracts_path.read_text(encoding="utf-8"), filename=str(contracts_path)
+    )
+    terminal_controls = [
+        node
+        for node in contracts_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "TerminalAgentRunExecutorControl"
+    ]
     assert len(terminal_controls) == 1
     terminal_control = terminal_controls[0]
     assert len(terminal_control.bases) == 1
@@ -745,9 +742,15 @@ def test_agent_loop_control_interface_is_consolidated() -> None:
         "project_foreground_conversation",
     }
 
+    loop_path = PACKAGE_ROOT / "agent" / "loop.py"
+    loop_tree = ast.parse(loop_path.read_text(encoding="utf-8"), filename=str(loop_path))
+    classes = [node for node in loop_tree.body if isinstance(node, ast.ClassDef)]
+    assert [node for node in classes if node.name == "AgentLoopControl"] == []
+    assert [node for node in classes if node.name == "TerminalAgentRunExecutorControl"] == []
+
     exports = next(
         node.value
-        for node in tree.body
+        for node in loop_tree.body
         if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets)
     )

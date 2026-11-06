@@ -96,6 +96,7 @@ async def schedule_http(
 
 
 @pytest.mark.asyncio
+@pytest.mark.xdist_group("real_service_process")
 async def test_schedule_jobs_http_crud_validates_all_kinds_and_is_cross_client_idempotent(
     tmp_path: Path,
 ) -> None:

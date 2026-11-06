@@ -4612,10 +4612,6 @@ async def test_task_fence_blocks_child_tools_before_cleanup_finishes(
     service._model_router._providers.clear()
     claim = cast(dict[str, Any], (await service.claim(client_id, workspace.workspace_id, sid))["claim"])
     version = cast(int, claim["claim_version"])
-    await workspace.input(client_id, sid, version, "initial delegation request", str(uuid4()))
-    await asyncio.wait_for(provider.child_started.wait(), timeout=5)
-    await _wait_for_idle(workspace, sid)
-    task = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_tasks"])[-1]
     entered = asyncio.Event()
     release = asyncio.Event()
     original = SubAgentPool.cancel_task_and_wait
@@ -4626,10 +4622,48 @@ async def test_task_fence_blocks_child_tools_before_cleanup_finishes(
         return await original(pool, task_id, generation)
 
     monkeypatch.setattr(SubAgentPool, "cancel_task_and_wait", delayed)
-    cancellation = asyncio.create_task(service.cancel_foreground_task(
-        client_id, workspace.workspace_id, sid, version, task["task_id"], task["revision"], "cancel"
-    ))
+    cancellation: asyncio.Task[dict[str, object]] | None = None
     try:
+        await workspace.input(client_id, sid, version, "initial delegation request", str(uuid4()))
+        try:
+            await asyncio.wait_for(provider.child_started.wait(), timeout=15)
+        except TimeoutError as error:
+            raise TimeoutError(
+                "Timed out waiting for the child Provider stream: "
+                f"router_dispatch_count={provider.router_dispatch_count}; "
+                f"router_catalogs={[sorted(names) for names in provider.router_tool_names]}; "
+                f"worker_catalogs={[sorted(names) for names in provider.worker_tool_names]}; "
+                f"spawn_requested={provider.spawn_requested}; "
+                f"child_started={provider.child_started.is_set()}"
+            ) from error
+        await _wait_for_idle(workspace, sid)
+        task = cast(list[dict[str, Any]], workspace.session_snapshot(sid)["foreground_tasks"])[-1]
+        assert provider.router_dispatch_count == 1
+        assert provider.router_tool_names
+        assert all(
+            names == {"ask_user", "dispatch_worker", "finish"}
+            for names in provider.router_tool_names
+        )
+        assert any("spawn_agent" in names for names in provider.worker_tool_names)
+        assert any("write_file" in names for names in provider.worker_tool_names)
+        items = cast(
+            list[dict[str, Any]],
+            service.list_subagents(client_id, workspace.workspace_id, sid)["items"],
+        )
+        assert len(items) == 1
+        child = _require_record(workspace.subagent_repository(sid), items[0]["agent_id"])
+        assert child.source.kind is SubAgentSourceKind.WORKER
+        assert child.source.worker_id is not None
+        assert child.source.task_id == task["task_id"]
+        assert child.source.task_generation == task["generation"]
+        worker = workspace.worker_store(sid).get(child.source.worker_id)
+        assert worker is not None
+        assert worker.parent_task_id == child.source.task_id
+        assert worker.parent_generation == child.source.task_generation
+
+        cancellation = asyncio.create_task(service.cancel_foreground_task(
+            client_id, workspace.workspace_id, sid, version, task["task_id"], task["revision"], "cancel"
+        ))
         await asyncio.wait_for(entered.wait(), timeout=5)
         provider.allow_write.set()
         await asyncio.wait_for(provider.write_seen.wait(), timeout=5)
@@ -4637,7 +4671,8 @@ async def test_task_fence_blocks_child_tools_before_cleanup_finishes(
     finally:
         release.set()
         provider.release_child.set()
-        await cancellation
+        if cancellation is not None:
+            await cancellation
 
 
 @pytest.mark.asyncio

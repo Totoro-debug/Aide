@@ -48,6 +48,9 @@ class _CountingProvider:
     def __init__(self) -> None:
         self.closed = 0
         self.schedule_started = asyncio.Event()
+        self.stream_catalogs: list[frozenset[str]] = []
+        self.stream_usages: list[tuple[int, int, int]] = []
+        self.finish_responses = 0
 
     async def complete(
         self,
@@ -100,17 +103,29 @@ class _CountingProvider:
     ) -> AsyncIterator[ModelStreamEvent]:
         if "shared schedule request" in json.dumps(messages):
             self.schedule_started.set()
-        has_router_finish = any(
-            (
-                isinstance(tool.get("function"), dict)
-                and tool["function"].get("name") == "finish"
-            )
-            or tool.get("name") == "finish"
+        catalog = frozenset(
+            name
             for tool in tools
+            if isinstance(
+                (
+                    name := (
+                        tool["function"].get("name")
+                        if isinstance(tool.get("function"), dict)
+                        else tool.get("name")
+                    )
+                ),
+                str,
+            )
         )
+        self.stream_catalogs.append(catalog)
+        has_router_finish = "finish" in catalog
         del messages, tools, model, max_output, temperature, reasoning_effort, timeout, continuation
 
         async def emit() -> AsyncIterator[ModelStreamEvent]:
+            usage = ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2)
+            self.stream_usages.append((usage.input_tokens, usage.output_tokens, usage.total_tokens))
+            if has_router_finish:
+                self.finish_responses += 1
             yield ModelCompleted(
                 ModelResponse(
                     message=AssistantModelMessage(
@@ -121,7 +136,7 @@ class _CountingProvider:
                             else ()
                         ),
                     ) if has_router_finish else AssistantModelMessage(content="ok"),
-                    usage=ModelUsage(input_tokens=1, output_tokens=1, total_tokens=2),
+                    usage=usage,
                     finish_reason="tool_calls" if has_router_finish else "stop",
                 )
             )
@@ -144,8 +159,8 @@ class _SessionCase:
             self.client_id, self.claim.session_id, self.claim.version, text, run_id
         )
 
-    async def completed(self, run_id: str) -> None:
-        event = await asyncio.wait_for(self.sink.wait_for("run.completed", run_id), timeout=5)
+    async def completed(self, run_id: str, *, timeout: float = 5) -> None:
+        event = await asyncio.wait_for(self.sink.wait_for("run.completed", run_id), timeout=timeout)
         payload = cast(dict[str, object], event["payload"])
         if payload["finish_reason"] == "suspended":
             store = self.workspace.foreground_work_store(self.claim.session_id)
@@ -256,11 +271,23 @@ async def test_service_shares_one_skill_loader_and_model_router_across_workspace
                 for index, case in enumerate(cases)
             )
         )
-        await asyncio.gather(*(case.completed(f"run-{index}") for index, case in enumerate(cases)))
+        await asyncio.gather(
+            *(case.completed(f"run-{index}", timeout=15) for index, case in enumerate(cases))
+        )
 
         assert len(load_calls) == 1
         assert load_calls[0] is service.skill_loader
         assert len(providers) == 1
+        assert providers[0].finish_responses >= len(cases)
+        router_catalogs = [
+            catalog for catalog in providers[0].stream_catalogs if "dispatch_worker" in catalog
+        ]
+        assert len(router_catalogs) >= len(cases)
+        assert all(
+            catalog == frozenset({"ask_user", "dispatch_worker", "finish"})
+            for catalog in router_catalogs
+        )
+        assert all(usage == (1, 1, 2) for usage in providers[0].stream_usages)
         assert len({case.claim.session_id for case in cases}) == 30
         for case in cases:
             assert case.workspace.resources is not None
